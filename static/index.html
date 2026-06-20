@@ -28,10 +28,36 @@
       flex-shrink: 0;
       z-index: 10;
     }
-    #header h1 { font-size: 17px; font-weight: 600; color: #fff; letter-spacing: 0.3px; }
+    #header h1 { font-size: 17px; font-weight: 600; color: #fff; }
 
-    /* ── Map ── */
-    #map { flex: 1; }
+    /* ── Map wrapper ── */
+    #map-wrap { flex: 1; position: relative; }
+    #map { width: 100%; height: 100%; }
+
+    /* ── Legend ── */
+    #legend {
+      position: absolute;
+      bottom: 36px;
+      right: 12px;
+      background: rgba(26,29,39,0.92);
+      border: 1px solid #2a2d3e;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12px;
+      z-index: 5;
+      pointer-events: none;
+      backdrop-filter: blur(4px);
+    }
+    #legend h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #888; margin-bottom: 8px; }
+    .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+    .legend-row:last-child { margin-bottom: 0; }
+    .legend-dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.5); flex-shrink: 0;
+    }
+    .legend-line {
+      width: 24px; height: 4px; border-radius: 2px; flex-shrink: 0;
+    }
 
     /* ── MapLibre popup overrides ── */
     .maplibregl-popup-content {
@@ -56,28 +82,67 @@
     <span style="font-size:22px">🔧</span>
     <h1>Pipe Digital Twin — Pipeline Monitor</h1>
   </div>
-  <div id="map"></div>
+
+  <div id="map-wrap">
+    <div id="map"></div>
+
+    <!-- Legend -->
+    <div id="legend">
+      <h3>Status</h3>
+      <div class="legend-row"><div class="legend-line" style="background:#4caf50"></div> Normal</div>
+      <div class="legend-row"><div class="legend-line" style="background:#ff9800"></div> Warning</div>
+      <div class="legend-row"><div class="legend-line" style="background:#f44336"></div> Anomaly</div>
+      <div style="height:8px"></div>
+      <div class="legend-row"><div class="legend-dot" style="background:#4caf50;box-shadow:0 0 6px #4caf50"></div> Node — Normal</div>
+      <div class="legend-row"><div class="legend-dot" style="background:#ff9800;box-shadow:0 0 6px #ff9800"></div> Node — Warning</div>
+      <div class="legend-row"><div class="legend-dot" style="background:#f44336;box-shadow:0 0 6px #f44336"></div> Node — Anomaly</div>
+    </div>
+  </div>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script>
 
-    // ── HARDCODED DATA (temporary — will be replaced with live sensor feed) ──────
+    // ── CONSTANTS ─────────────────────────────────────────────────────────────────
+    const STATE_COLOR = {
+      normal:  '#4caf50',
+      warning: '#ff9800',
+      anomaly: '#f44336',
+      unknown: '#9e9e9e',
+    };
+
+    function stateColor(state) { return STATE_COLOR[state] ?? STATE_COLOR.unknown; }
+    function stateGlow(state)  {
+      const c = stateColor(state);
+      return `0 0 12px ${c}cc`;
+    }
+
+    // ── HARDCODED DATA ────────────────────────────────────────────────────────────
+    // Each node "owns" one stretch of pipe (SEGMENT_PIPES[i] corresponds to NODES[i])
     const NODES = [
-      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: 67.5, trend: "stable" },
-      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal", temp: 68.0, trend: "stable" },
-      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal", temp: 66.5, trend: "stable" },
+      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal",  temp: 67.5, trend: "stable" },
+      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal",  temp: 68.0, trend: "stable" },
+      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal",  temp: 66.5, trend: "stable" },
     ];
 
-    // Full pipeline route — all nodes lie along this path
-    const PIPELINE_PATH = [
-      [32.844, 39.932],   // pipeline start
-      [32.850, 39.930],   // Node A
-      [32.865, 39.925],   // Node B
-      [32.880, 39.920],   // Node C
-      [32.886, 39.918],   // pipeline end
+    // Each segment's pipe geometry — consecutive segments share endpoints
+    const SEGMENT_PIPES = [
+      [[32.844, 39.932], [32.850, 39.930], [32.858, 39.9275]],   // Segment A
+      [[32.858, 39.9275], [32.865, 39.925], [32.872, 39.9225]],  // Segment B
+      [[32.872, 39.9225], [32.880, 39.920], [32.886, 39.918]],   // Segment C
     ];
 
-    // ── MAP INITIALISATION ────────────────────────────────────────────────────────
+    function buildPipeGeoJSON(nodes) {
+      return {
+        type: 'FeatureCollection',
+        features: nodes.map((node, i) => ({
+          type: 'Feature',
+          properties: { id: node.id, state: node.state },
+          geometry: { type: 'LineString', coordinates: SEGMENT_PIPES[i] }
+        }))
+      };
+    }
+
+    // ── MAP INIT ──────────────────────────────────────────────────────────────────
     const map = new maplibregl.Map({
       container: 'map',
       style: {
@@ -99,40 +164,47 @@
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
+    // Track marker DOM elements so we can update colors later
+    const markerEls = new Map();  // nodeId → HTMLElement
+
     map.on('load', () => {
 
-      // ── PIPELINE LINE ──────────────────────────────────────────────────────────
-      map.addSource('pipeline', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          geometry: { type: 'LineString', coordinates: PIPELINE_PATH }
+      // ── PIPE SEGMENTS (one per node, state-driven color) ──────────────────────
+      map.addSource('pipes', { type: 'geojson', data: buildPipeGeoJSON(NODES) });
+
+      // Soft glow under the coloured lines
+      map.addLayer({
+        id: 'pipes-glow',
+        type: 'line',
+        source: 'pipes',
+        paint: { 'line-color': '#ffffff', 'line-width': 14, 'line-opacity': 0.08 }
+      });
+
+      map.addLayer({
+        id: 'pipes-line',
+        type: 'line',
+        source: 'pipes',
+        paint: {
+          'line-width': 7,
+          'line-cap': 'round',
+          'line-join': 'round',
+          'line-color': ['match', ['get', 'state'],
+            'anomaly', '#f44336',
+            'warning', '#ff9800',
+            '#4caf50'   // default: normal / unknown
+          ]
         }
-      });
-
-      // Soft glow behind the line for legibility on satellite-style tiles
-      map.addLayer({
-        id: 'pipeline-glow',
-        type: 'line',
-        source: 'pipeline',
-        paint: { 'line-color': '#ffffff', 'line-width': 14, 'line-opacity': 0.1 }
-      });
-
-      map.addLayer({
-        id: 'pipeline-line',
-        type: 'line',
-        source: 'pipeline',
-        paint: { 'line-color': '#4caf50', 'line-width': 6, 'line-cap': 'round', 'line-join': 'round' }
       });
 
       // ── NODE MARKERS ───────────────────────────────────────────────────────────
       NODES.forEach(node => {
         const el = document.createElement('div');
         el.style.cssText = [
-          'width: 20px', 'height: 20px', 'border-radius: 50%',
-          'background: #4caf50', 'border: 3px solid #ffffff',
-          'box-shadow: 0 0 12px rgba(76,175,80,.8)',
-          'cursor: pointer', 'transition: transform .15s ease',
+          'width:20px', 'height:20px', 'border-radius:50%',
+          `background:${stateColor(node.state)}`,
+          'border:3px solid #fff',
+          `box-shadow:${stateGlow(node.state)}`,
+          'cursor:pointer', 'transition:transform .15s ease',
         ].join(';');
 
         el.addEventListener('mouseenter', () => el.style.transform = 'scale(1.35)');
@@ -141,7 +213,8 @@
         const popup = new maplibregl.Popup({ offset: 22 }).setHTML(`
           <strong style="font-size:14px">${node.name}</strong><br>
           <span style="color:#aaa">Temperature:</span> <b>${node.temp}&nbsp;°C</b><br>
-          <span style="color:#aaa">State:</span> <b style="color:#4caf50">${node.state.toUpperCase()}</b><br>
+          <span style="color:#aaa">State:</span>
+            <b style="color:${stateColor(node.state)}">${node.state.toUpperCase()}</b><br>
           <span style="color:#aaa">Trend:</span> ${node.trend}
         `);
 
@@ -149,8 +222,24 @@
           .setLngLat([node.lng, node.lat])
           .setPopup(popup)
           .addTo(map);
+
+        markerEls.set(node.id, el);
       });
     });
+
+    // ── HELPER — update marker + pipe colors when node states change ──────────────
+    function applyNodeStates(nodes) {
+      nodes.forEach(node => {
+        const el = markerEls.get(node.id);
+        if (!el) return;
+        el.style.background    = stateColor(node.state);
+        el.style.boxShadow     = stateGlow(node.state);
+      });
+
+      if (map.getSource('pipes')) {
+        map.getSource('pipes').setData(buildPipeGeoJSON(nodes));
+      }
+    }
 
   </script>
 </body>
