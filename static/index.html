@@ -327,6 +327,15 @@
     function stateColor(s) { return STATE_COLOR[s] ?? STATE_COLOR.unknown; }
     function stateGlow(s)  { return `0 0 12px ${stateColor(s)}cc`; }
 
+    // Full pipeline path (all nodes lie along this route)
+    const PIPELINE_PATH = [
+      [32.844, 39.932],
+      [32.850, 39.930],
+      [32.865, 39.925],
+      [32.880, 39.920],
+      [32.886, 39.918],
+    ];
+
     // ── NODE DEFINITIONS (positions fixed; state/temp overwritten by API) ─────────
     const NODES = [
       { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
@@ -382,22 +391,38 @@
     map.on('load', () => {
       mapReady = true;
 
-      // ── Pipe segments ──────────────────────────────────────────────────────────
-      map.addSource('pipes', { type: 'geojson', data: buildPipeGeoJSON(NODES) });
+      // ── Continuous backbone — one unbroken line for the full pipeline ──────────
+      map.addSource('backbone', {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: PIPELINE_PATH } }
+      });
+
+      // Dark casing behind the backbone gives the pipe a physical "body"
+      map.addLayer({
+        id: 'backbone-casing',
+        type: 'line',
+        source: 'backbone',
+        paint: { 'line-color': '#000', 'line-width': 14, 'line-opacity': 0.35, 'line-cap': 'round', 'line-join': 'round' }
+      });
 
       map.addLayer({
-        id: 'pipes-glow',
+        id: 'backbone-line',
         type: 'line',
-        source: 'pipes',
-        paint: { 'line-color': '#fff', 'line-width': 14, 'line-opacity': 0.08 }
+        source: 'backbone',
+        paint: { 'line-color': '#1e2235', 'line-width': 11, 'line-cap': 'round', 'line-join': 'round' }
       });
+
+      // ── Colored segments on top (health status per node) ───────────────────────
+      map.addSource('pipes', { type: 'geojson', data: buildPipeGeoJSON(NODES) });
 
       map.addLayer({
         id: 'pipes-line',
         type: 'line',
         source: 'pipes',
         paint: {
-          'line-width': 7, 'line-cap': 'round', 'line-join': 'round',
+          'line-width': 7,
+          'line-cap': 'butt',    // butt caps prevent doubled round ends at junctions
+          'line-join': 'round',
           'line-color': ['match', ['get', 'state'],
             'anomaly', '#f44336', 'warning', '#ff9800', '#2196f3'
           ]
