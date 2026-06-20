@@ -20,7 +20,7 @@
     /* ── Header ── */
     #header {
       background: #1a1d27;
-      padding: 12px 20px;
+      padding: 10px 20px;
       border-bottom: 1px solid #2a2d3e;
       display: flex;
       align-items: center;
@@ -28,10 +28,40 @@
       flex-shrink: 0;
       z-index: 10;
     }
-    #header h1 { font-size: 17px; font-weight: 600; color: #fff; }
+    #header h1 { font-size: 17px; font-weight: 600; color: #fff; flex: 1; }
+
+    /* ── Status bar ── */
+    #statusbar {
+      background: #131620;
+      border-bottom: 1px solid #2a2d3e;
+      padding: 6px 20px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-size: 12px;
+      color: #888;
+      flex-shrink: 0;
+      z-index: 10;
+    }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    .chip-ok      { background: rgba(76,175,80,.15);  color: #4caf50; }
+    .chip-warn    { background: rgba(255,152,0,.15);  color: #ff9800; }
+    .chip-anomaly { background: rgba(244,67,54,.15);  color: #f44336; }
+    .chip-anomaly.active { background: rgba(244,67,54,.3); animation: pulse-chip 1.2s infinite; }
+    @keyframes pulse-chip { 0%,100%{ opacity:1 } 50%{ opacity:.55 } }
+
+    #last-update { margin-left: auto; color: #555; }
 
     /* ── Map wrapper ── */
-    #map-wrap { flex: 1; position: relative; }
+    #map-wrap { flex: 1; position: relative; overflow: hidden; }
     #map { width: 100%; height: 100%; }
 
     /* ── Legend ── */
@@ -48,16 +78,11 @@
       pointer-events: none;
       backdrop-filter: blur(4px);
     }
-    #legend h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #888; margin-bottom: 8px; }
+    #legend h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: #666; margin-bottom: 8px; }
     .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
     .legend-row:last-child { margin-bottom: 0; }
-    .legend-dot {
-      width: 12px; height: 12px; border-radius: 50%;
-      border: 2px solid rgba(255,255,255,0.5); flex-shrink: 0;
-    }
-    .legend-line {
-      width: 24px; height: 4px; border-radius: 2px; flex-shrink: 0;
-    }
+    .legend-dot  { width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(255,255,255,.4); flex-shrink: 0; }
+    .legend-line { width: 24px; height: 4px; border-radius: 2px; flex-shrink: 0; }
 
     /* ── MapLibre popup overrides ── */
     .maplibregl-popup-content {
@@ -68,7 +93,7 @@
       padding: 12px 16px;
       font-size: 13px;
       line-height: 1.7;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      box-shadow: 0 4px 20px rgba(0,0,0,.5);
     }
     .maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: #1a1d27; }
     .maplibregl-popup-anchor-top    .maplibregl-popup-tip { border-bottom-color: #1a1d27; }
@@ -78,15 +103,25 @@
 </head>
 <body>
 
+  <!-- Header -->
   <div id="header">
     <span style="font-size:22px">🔧</span>
     <h1>Pipe Digital Twin — Pipeline Monitor</h1>
   </div>
 
+  <!-- Live status bar -->
+  <div id="statusbar">
+    <span>Live status:</span>
+    <span id="chip-ok"      class="status-chip chip-ok">● 3 Normal</span>
+    <span id="chip-warn"    class="status-chip chip-warn">● 0 Warning</span>
+    <span id="chip-anomaly" class="status-chip chip-anomaly">● 0 Anomaly</span>
+    <span id="last-update">—</span>
+  </div>
+
+  <!-- Map + legend -->
   <div id="map-wrap">
     <div id="map"></div>
 
-    <!-- Legend -->
     <div id="legend">
       <h3>Status</h3>
       <div class="legend-row"><div class="legend-line" style="background:#4caf50"></div> Normal</div>
@@ -103,32 +138,30 @@
   <script>
 
     // ── CONSTANTS ─────────────────────────────────────────────────────────────────
+    const POLL_INTERVAL = 3000; // ms
+
     const STATE_COLOR = {
       normal:  '#4caf50',
       warning: '#ff9800',
       anomaly: '#f44336',
       unknown: '#9e9e9e',
     };
+    function stateColor(s) { return STATE_COLOR[s] ?? STATE_COLOR.unknown; }
+    function stateGlow(s)  { return `0 0 12px ${stateColor(s)}cc`; }
 
-    function stateColor(state) { return STATE_COLOR[state] ?? STATE_COLOR.unknown; }
-    function stateGlow(state)  {
-      const c = stateColor(state);
-      return `0 0 12px ${c}cc`;
-    }
-
-    // ── HARDCODED DATA ────────────────────────────────────────────────────────────
-    // Each node "owns" one stretch of pipe (SEGMENT_PIPES[i] corresponds to NODES[i])
+    // ── HARDCODED NODE DEFINITIONS (positions & names) ────────────────────────────
+    // State and temperature fields will be overwritten by live API data
     const NODES = [
-      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal",  temp: 67.5, trend: "stable" },
-      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal",  temp: 68.0, trend: "stable" },
-      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal",  temp: 66.5, trend: "stable" },
+      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: null, trend: "—" },
+      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal", temp: null, trend: "—" },
+      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal", temp: null, trend: "—" },
     ];
 
-    // Each segment's pipe geometry — consecutive segments share endpoints
+    // Each node monitors one stretch of pipe; consecutive segments share endpoints
     const SEGMENT_PIPES = [
-      [[32.844, 39.932], [32.850, 39.930], [32.858, 39.9275]],   // Segment A
-      [[32.858, 39.9275], [32.865, 39.925], [32.872, 39.9225]],  // Segment B
-      [[32.872, 39.9225], [32.880, 39.920], [32.886, 39.918]],   // Segment C
+      [[32.844, 39.932], [32.850, 39.930], [32.858, 39.9275]],
+      [[32.858, 39.9275], [32.865, 39.925], [32.872, 39.9225]],
+      [[32.872, 39.9225], [32.880, 39.920], [32.886, 39.918]],
     ];
 
     function buildPipeGeoJSON(nodes) {
@@ -164,20 +197,22 @@
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
     map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
-    // Track marker DOM elements so we can update colors later
-    const markerEls = new Map();  // nodeId → HTMLElement
+    // Track marker DOM elements so we can update their colors during polling
+    const markerEls  = new Map();   // nodeId → HTMLElement
+    const markerObjs = new Map();   // nodeId → maplibregl.Marker (to access popup)
+    let mapReady = false;
 
     map.on('load', () => {
+      mapReady = true;
 
-      // ── PIPE SEGMENTS (one per node, state-driven color) ──────────────────────
+      // ── Pipe segments ──────────────────────────────────────────────────────────
       map.addSource('pipes', { type: 'geojson', data: buildPipeGeoJSON(NODES) });
 
-      // Soft glow under the coloured lines
       map.addLayer({
         id: 'pipes-glow',
         type: 'line',
         source: 'pipes',
-        paint: { 'line-color': '#ffffff', 'line-width': 14, 'line-opacity': 0.08 }
+        paint: { 'line-color': '#fff', 'line-width': 14, 'line-opacity': 0.08 }
       });
 
       map.addLayer({
@@ -191,14 +226,15 @@
           'line-color': ['match', ['get', 'state'],
             'anomaly', '#f44336',
             'warning', '#ff9800',
-            '#4caf50'   // default: normal / unknown
+            '#4caf50'
           ]
         }
       });
 
-      // ── NODE MARKERS ───────────────────────────────────────────────────────────
+      // ── Node markers ───────────────────────────────────────────────────────────
       NODES.forEach(node => {
         const el = document.createElement('div');
+        el.dataset.nodeId = node.id;
         el.style.cssText = [
           'width:20px', 'height:20px', 'border-radius:50%',
           `background:${stateColor(node.state)}`,
@@ -210,34 +246,91 @@
         el.addEventListener('mouseenter', () => el.style.transform = 'scale(1.35)');
         el.addEventListener('mouseleave', () => el.style.transform = 'scale(1)');
 
-        const popup = new maplibregl.Popup({ offset: 22 }).setHTML(`
-          <strong style="font-size:14px">${node.name}</strong><br>
-          <span style="color:#aaa">Temperature:</span> <b>${node.temp}&nbsp;°C</b><br>
-          <span style="color:#aaa">State:</span>
-            <b style="color:${stateColor(node.state)}">${node.state.toUpperCase()}</b><br>
-          <span style="color:#aaa">Trend:</span> ${node.trend}
-        `);
+        const popup = new maplibregl.Popup({ offset: 22 })
+          .setHTML(buildPopupHTML(node));
 
-        new maplibregl.Marker({ element: el })
+        const marker = new maplibregl.Marker({ element: el })
           .setLngLat([node.lng, node.lat])
           .setPopup(popup)
           .addTo(map);
 
         markerEls.set(node.id, el);
+        markerObjs.set(node.id, marker);
       });
+
+      // Start polling immediately
+      poll();
+      setInterval(poll, POLL_INTERVAL);
     });
 
-    // ── HELPER — update marker + pipe colors when node states change ──────────────
+    // ── POPUP HTML ────────────────────────────────────────────────────────────────
+    function buildPopupHTML(node) {
+      const tempStr = node.temp != null ? `${node.temp} °C` : '—';
+      return `
+        <strong style="font-size:14px">${node.name}</strong><br>
+        <span style="color:#aaa">Temperature:</span> <b>${tempStr}</b><br>
+        <span style="color:#aaa">State:</span>
+          <b style="color:${stateColor(node.state)}">${node.state.toUpperCase()}</b><br>
+        <span style="color:#aaa">Trend:</span> ${node.trend}
+      `;
+    }
+
+    // ── APPLY STATE UPDATES TO MAP + MARKERS ─────────────────────────────────────
     function applyNodeStates(nodes) {
       nodes.forEach(node => {
         const el = markerEls.get(node.id);
-        if (!el) return;
-        el.style.background    = stateColor(node.state);
-        el.style.boxShadow     = stateGlow(node.state);
+        if (el) {
+          el.style.background = stateColor(node.state);
+          el.style.boxShadow  = stateGlow(node.state);
+        }
+        const m = markerObjs.get(node.id);
+        if (m) m.getPopup().setHTML(buildPopupHTML(node));
       });
 
-      if (map.getSource('pipes')) {
+      if (mapReady) {
         map.getSource('pipes').setData(buildPipeGeoJSON(nodes));
+      }
+    }
+
+    // ── STATUS BAR ────────────────────────────────────────────────────────────────
+    function updateStatusBar(data) {
+      const normal  = Object.values(data.segments).filter(s => s.state === 'normal').length;
+      const warn    = (data.warnings  || []).length;
+      const anomaly = (data.anomalies || []).length;
+
+      document.getElementById('chip-ok').textContent      = `● ${normal} Normal`;
+      document.getElementById('chip-warn').textContent    = `● ${warn} Warning`;
+      document.getElementById('chip-anomaly').textContent = `● ${anomaly} Anomaly`;
+
+      const chipA = document.getElementById('chip-anomaly');
+      chipA.classList.toggle('active', anomaly > 0);
+
+      const ts = new Date(data.timestamp);
+      document.getElementById('last-update').textContent =
+        `Last update: ${ts.toLocaleTimeString()}`;
+    }
+
+    // ── POLL /api/twin-state ──────────────────────────────────────────────────────
+    async function poll() {
+      try {
+        const res  = await fetch('/api/twin-state');
+        const data = await res.json();
+
+        // Merge API data into local node list (preserving hardcoded positions/names)
+        const updated = NODES.map(node => {
+          const seg = data.segments[node.id];
+          if (!seg) return node;
+          return { ...node, state: seg.state, temp: seg.temp, trend: seg.trend };
+        });
+
+        // Mutate NODES in place so applyNodeStates always has fresh data
+        updated.forEach((u, i) => Object.assign(NODES[i], u));
+
+        applyNodeStates(NODES);
+        updateStatusBar(data);
+      } catch (err) {
+        console.warn('Poll failed:', err);
+        document.getElementById('last-update').textContent = 'Connection lost — retrying…';
       }
     }
 
