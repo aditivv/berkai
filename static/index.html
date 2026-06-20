@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+<head><title>Pipe Digital Twin</title></head>
+<body>
+  <h1>Pipe Segment Monitor</h1>
+  <pre id="output">Loading...</pre>
+  <script>
+    async function poll() {
+      const res = await fetch('/api/twin-state');
+      const data = await res.json();
+      document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+    }
+    poll();
+    setInterval(poll, 3000);
+  </script>
+</body>
+</html>
