@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pipe Digital Twin</title>
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; overflow: hidden; }
@@ -58,12 +57,12 @@
     @keyframes pulse-chip { 0%,100%{ opacity:1 } 50%{ opacity:.5 } }
     #last-update { margin-left: auto; color: #555; }
 
-    /* ── Content row (map + panel) ── */
+    /* ── Content row (3D scene + panel) ── */
     #content { flex: 1; display: flex; overflow: hidden; }
 
-    /* ── Map ── */
-    #map-wrap { flex: 1; position: relative; }
-    #map { width: 100%; height: 100%; }
+    /* ── 3D scene ── */
+    #twin-wrap { flex: 1; position: relative; cursor: grab; }
+    #twin-canvas { width: 100%; height: 100%; display: block; }
 
     /* ── Legend ── */
     #legend {
@@ -83,7 +82,6 @@
     .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
     .legend-row:last-child { margin-bottom: 0; }
     .legend-dot  { width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(255,255,255,.4); flex-shrink: 0; }
-    .legend-line { width: 24px; height: 4px; border-radius: 2px; flex-shrink: 0; }
 
     /* ── Detail panel ── */
     #panel {
@@ -235,26 +233,22 @@
     <span id="last-update">—</span>
   </div>
 
-  <!-- Map + side panel -->
+  <!-- 3D scene + side panel -->
   <div id="content">
 
-    <div id="map-wrap">
-      <div id="map"></div>
+    <div id="twin-wrap">
+      <canvas id="twin-canvas"></canvas>
 
       <!-- Legend -->
       <div id="legend">
         <h3>Status</h3>
-        <div class="legend-row"><div class="legend-line" style="background:#2196f3"></div> Normal</div>
-        <div class="legend-row"><div class="legend-line" style="background:#ff9800"></div> Warning</div>
-        <div class="legend-row"><div class="legend-line" style="background:#f44336"></div> Anomaly</div>
-        <div style="height:8px"></div>
-        <div class="legend-row"><div class="legend-dot" style="background:#2196f3;box-shadow:0 0 6px #2196f3"></div> Node — Normal</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#ff9800;box-shadow:0 0 6px #ff9800"></div> Node — Warning</div>
-        <div class="legend-row"><div class="legend-dot" style="background:#f44336;box-shadow:0 0 6px #f44336"></div> Node — Anomaly</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#2196f3;box-shadow:0 0 6px #2196f3"></div> Normal</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#ff9800;box-shadow:0 0 6px #ff9800"></div> Warning</div>
+        <div class="legend-row"><div class="legend-dot" style="background:#f44336;box-shadow:0 0 6px #f44336"></div> Anomaly</div>
       </div>
 
       <!-- Click-hint (fades when panel opens) -->
-      <div id="panel-hint">Click any node to inspect</div>
+      <div id="panel-hint">Drag to rotate · click a node to inspect</div>
     </div>
 
     <!-- Detail panel -->
@@ -317,151 +311,170 @@
 
   </div><!-- /content -->
 
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script>
 
     // ── CONSTANTS ─────────────────────────────────────────────────────────────────
     const POLL_INTERVAL = 3000;
 
-    const STATE_COLOR = { normal: '#2196f3', warning: '#ff9800', anomaly: '#f44336', unknown: '#9e9e9e' };
-    function stateColor(s) { return STATE_COLOR[s] ?? STATE_COLOR.unknown; }
-    function stateGlow(s)  { return `0 0 12px ${stateColor(s)}cc`; }
+    const STATE_COLOR_HEX = { normal: 0x2196f3, warning: 0xff9800, anomaly: 0xf44336, unknown: 0x9e9e9e };
+    function stateColorHex(s) { return STATE_COLOR_HEX[s] ?? STATE_COLOR_HEX.unknown; }
+    function stateColorCss(s) { return '#' + stateColorHex(s).toString(16).padStart(6, '0'); }
 
-    // Full pipeline path (all nodes lie along this route)
-    const PIPELINE_PATH = [
-      [32.844, 39.932],
-      [32.850, 39.930],
-      [32.865, 39.925],
-      [32.880, 39.920],
-      [32.886, 39.918],
-    ];
+    // ── LIVE STATE (rebuilt from /api/twin-state, not hardcoded) ──────────────────
+    let NODES = [];                    // [{id, name, state, temp, trend, last_seen, temp_normal}]
+    let selectedNodeId = null;
+    let builtNodeCount = 0;
 
-    // ── NODE DEFINITIONS (positions fixed; state/temp overwritten by API) ─────────
-    const NODES = [
-      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
-      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
-      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
-    ];
+    // ── THREE.JS SCENE ──────────────────────────────────────────────────────────────
+    const wrap = document.getElementById('twin-wrap');
+    const canvas = document.getElementById('twin-canvas');
 
-    const SEGMENT_PIPES = [
-      [[32.844, 39.932], [32.850, 39.930], [32.858, 39.9275]],
-      [[32.858, 39.9275], [32.865, 39.925], [32.872, 39.9225]],
-      [[32.872, 39.9225], [32.880, 39.920], [32.886, 39.918]],
-    ];
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 100);
+    camera.position.set(0, 2.4, 7.2);
+    camera.lookAt(0, 0, 0);
 
-    function buildPipeGeoJSON(nodes) {
-      return {
-        type: 'FeatureCollection',
-        features: nodes.map((n, i) => ({
-          type: 'Feature',
-          properties: { id: n.id, state: n.state },
-          geometry: { type: 'LineString', coordinates: SEGMENT_PIPES[i] }
-        }))
-      };
+    const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+    renderer.setClearColor(0x000000, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.9);
+    dirLight1.position.set(4, 5, 3);
+    scene.add(dirLight1);
+    const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+    dirLight2.position.set(-3, -2, -4);
+    scene.add(dirLight2);
+
+    const group = new THREE.Group();
+    scene.add(group);
+
+    const nodeMeshMap = new Map(); // nodeId → mesh
+
+    function buildCurve(n) {
+      const segs = Math.max(n, 2);
+      const pts = [];
+      for (let i = 0; i <= segs; i++) {
+        const x = -3.4 + (6.8 * i) / segs;
+        const z = 0.6 * Math.sin((i / segs) * Math.PI * 2);
+        const y = 0.3 * Math.sin((i / segs) * Math.PI * 3 + 1);
+        pts.push(new THREE.Vector3(x, y, z));
+      }
+      return new THREE.CatmullRomCurve3(pts);
     }
 
-    // ── SELECTED NODE ─────────────────────────────────────────────────────────────
-    let selectedNodeId = null;
+    function buildScene(nodeList) {
+      [...group.children].forEach(c => group.remove(c));
+      nodeMeshMap.clear();
+      if (nodeList.length === 0) return;
 
-    // ── MAP INIT ──────────────────────────────────────────────────────────────────
-    const map = new maplibregl.Map({
-      container: 'map',
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          }
-        },
-        layers: [{ id: 'osm-raster', type: 'raster', source: 'osm' }]
-      },
-      center: [32.865, 39.925],
-      zoom: 13
+      const curve = buildCurve(nodeList.length);
+      const tubeGeo = new THREE.TubeGeometry(curve, 64, 0.32, 16, false);
+      const tubeMat = new THREE.MeshStandardMaterial({ color: 0x3a3f55, roughness: 0.55, metalness: 0.15 });
+      group.add(new THREE.Mesh(tubeGeo, tubeMat));
+
+      nodeList.forEach((node, i) => {
+        const t = (i + 0.5) / nodeList.length;
+        const pos = curve.getPointAt(t);
+        const geo = new THREE.SphereGeometry(0.42, 24, 24);
+        const mat = new THREE.MeshStandardMaterial({ color: stateColorHex(node.state), roughness: 0.4, metalness: 0.1 });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.copy(pos);
+        mesh.userData.id = node.id;
+        group.add(mesh);
+        nodeMeshMap.set(node.id, mesh);
+      });
+    }
+
+    // ── DRAG TO ROTATE + CLICK/HOVER ON NODES ──────────────────────────────────────
+    let dragging = false, downX = 0, downY = 0, lastX = 0, lastY = 0;
+    let rotY = 0.4, rotX = 0.12, autoRotate = true;
+    let hoveredMesh = null;
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function setMouseFromEvent(e) {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    }
+
+    function pickNodeMesh(e) {
+      setMouseFromEvent(e);
+      raycaster.setFromCamera(mouse, camera);
+      const meshes = [...nodeMeshMap.values()];
+      const hits = raycaster.intersectObjects(meshes);
+      return hits.length ? hits[0].object : null;
+    }
+
+    wrap.addEventListener('pointerdown', e => {
+      dragging = true; autoRotate = false;
+      downX = lastX = e.clientX; downY = lastY = e.clientY;
+      wrap.style.cursor = 'grabbing';
     });
 
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
-    map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+    window.addEventListener('pointerup', e => {
+      if (dragging && Math.hypot(e.clientX - downX, e.clientY - downY) < 6) {
+        const mesh = pickNodeMesh(e);
+        if (mesh) openPanel(mesh.userData.id);
+      }
+      dragging = false;
+      wrap.style.cursor = 'grab';
+    });
 
-    const markerEls = new Map();   // nodeId → HTMLElement
-    let mapReady = false;
+    window.addEventListener('pointermove', e => {
+      if (!dragging) {
+        const mesh = pickNodeMesh(e);
+        if (hoveredMesh && hoveredMesh !== mesh) hoveredMesh.scale.set(1, 1, 1);
+        if (mesh) { mesh.scale.set(1.25, 1.25, 1.25); wrap.style.cursor = 'pointer'; }
+        else wrap.style.cursor = 'grab';
+        hoveredMesh = mesh;
+        return;
+      }
+      rotY += (e.clientX - lastX) * 0.005;
+      rotX += (e.clientY - lastY) * 0.005;
+      rotX = Math.max(-0.8, Math.min(0.8, rotX));
+      lastX = e.clientX; lastY = e.clientY;
+    });
 
-    map.on('load', () => {
-      mapReady = true;
+    function onResize() {
+      camera.aspect = wrap.clientWidth / wrap.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+    }
+    new ResizeObserver(onResize).observe(wrap);
 
-      // ── Continuous backbone — one unbroken line for the full pipeline ──────────
-      map.addSource('backbone', {
-        type: 'geojson',
-        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: PIPELINE_PATH } }
-      });
+    const clock = new THREE.Clock();
+    function animate() {
+      requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+      if (autoRotate) rotY += 0.0025;
+      group.rotation.y = rotY;
+      group.rotation.x = rotX;
 
-      // Dark casing behind the backbone gives the pipe a physical "body"
-      map.addLayer({
-        id: 'backbone-casing',
-        type: 'line',
-        source: 'backbone',
-        paint: { 'line-color': '#000', 'line-width': 14, 'line-opacity': 0.35, 'line-cap': 'round', 'line-join': 'round' }
-      });
-
-      map.addLayer({
-        id: 'backbone-line',
-        type: 'line',
-        source: 'backbone',
-        paint: { 'line-color': '#1e2235', 'line-width': 11, 'line-cap': 'round', 'line-join': 'round' }
-      });
-
-      // ── Colored segments on top (health status per node) ───────────────────────
-      map.addSource('pipes', { type: 'geojson', data: buildPipeGeoJSON(NODES) });
-
-      map.addLayer({
-        id: 'pipes-line',
-        type: 'line',
-        source: 'pipes',
-        paint: {
-          'line-width': 7,
-          'line-cap': 'butt',    // butt caps prevent doubled round ends at junctions
-          'line-join': 'round',
-          'line-color': ['match', ['get', 'state'],
-            'anomaly', '#f44336', 'warning', '#ff9800', '#2196f3'
-          ]
+      nodeMeshMap.forEach((mesh, id) => {
+        if (mesh === hoveredMesh) return;
+        const node = NODES.find(n => n.id === id);
+        if (node && node.state === 'anomaly') {
+          const s = 1 + 0.12 * Math.sin(t * 4);
+          mesh.scale.set(s, s, s);
+        } else {
+          mesh.scale.set(1, 1, 1);
         }
       });
 
-      // ── Node markers ───────────────────────────────────────────────────────────
-      NODES.forEach(node => {
-        const el = document.createElement('div');
-        el.dataset.nodeId = node.id;
-        el.style.cssText = [
-          'width:20px', 'height:20px', 'border-radius:50%',
-          `background:${stateColor(node.state)}`, 'border:3px solid #fff',
-          `box-shadow:${stateGlow(node.state)}`,
-          'cursor:pointer', 'transition:transform .15s ease, box-shadow .3s ease',
-        ].join(';');
-
-        el.addEventListener('mouseenter', () => el.style.transform = 'scale(1.35)');
-        el.addEventListener('mouseleave', () => el.style.transform = 'scale(1)');
-        el.addEventListener('click', () => openPanel(node.id));
-
-        new maplibregl.Marker({ element: el })
-          .setLngLat([node.lng, node.lat])
-          .addTo(map);
-
-        markerEls.set(node.id, el);
-      });
-
-      // Start polling
-      poll();
-      setInterval(poll, POLL_INTERVAL);
-    });
+      renderer.render(scene, camera);
+    }
+    animate();
 
     // ── PANEL ─────────────────────────────────────────────────────────────────────
     function openPanel(nodeId) {
       selectedNodeId = nodeId;
       document.getElementById('panel-hint').classList.add('hidden');
       document.getElementById('panel').classList.add('open');
-      map.resize();   // recalculate map width after panel opens
       refreshPanel();
     }
 
@@ -469,7 +482,6 @@
       selectedNodeId = null;
       document.getElementById('panel').classList.remove('open');
       document.getElementById('panel-hint').classList.remove('hidden');
-      map.resize();
     }
 
     function refreshPanel() {
@@ -477,7 +489,7 @@
       const node = NODES.find(n => n.id === selectedNodeId);
       if (!node) return;
 
-      const color = stateColor(node.state);
+      const color = stateColorCss(node.state);
 
       document.getElementById('panel-name').textContent      = node.name;
       document.getElementById('panel-last-seen').textContent = node.last_seen
@@ -495,7 +507,6 @@
         node.temp_normal ? `${node.temp_normal[0]}–${node.temp_normal[1]}` : '—';
       document.getElementById('panel-trend').textContent = node.trend || '—';
 
-      // Tint the camera placeholder border to match state
       document.getElementById('camera-feed').style.borderColor =
         node.state !== 'normal' ? `${color}66` : '#2a2d3e';
     }
@@ -513,7 +524,6 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ segment_id: selectedNodeId })
         });
-        // The next poll will pick up the change
         await poll();
       } catch (e) {
         console.error('demo-anomaly failed', e);
@@ -521,19 +531,6 @@
         btn.disabled = false;
         btn.textContent = '⚠ Trigger Anomaly on this Node';
       }
-    }
-
-    // ── APPLY STATE UPDATES ───────────────────────────────────────────────────────
-    function applyNodeStates(nodes) {
-      nodes.forEach(node => {
-        const el = markerEls.get(node.id);
-        if (el) {
-          el.style.background = stateColor(node.state);
-          el.style.boxShadow  = stateGlow(node.state);
-        }
-      });
-      if (mapReady) map.getSource('pipes').setData(buildPipeGeoJSON(nodes));
-      refreshPanel();  // keep the open panel in sync
     }
 
     // ── STATUS BAR ────────────────────────────────────────────────────────────────
@@ -557,23 +554,29 @@
         const res  = await fetch('/api/twin-state');
         const data = await res.json();
 
-        NODES.forEach(node => {
-          const seg = data.segments[node.id];
-          if (!seg) return;
-          node.state      = seg.state;
-          node.temp       = seg.temp;
-          node.trend      = seg.trend;
-          node.last_seen  = seg.last_seen;
-          if (seg.temp_normal) node.temp_normal = seg.temp_normal;
-        });
+        const ids = Object.keys(data.segments).map(Number).sort((a, b) => a - b);
+        NODES = ids.map(id => ({ id, ...data.segments[id] }));
 
-        applyNodeStates(NODES);
+        if (ids.length !== builtNodeCount) {
+          buildScene(NODES);
+          builtNodeCount = ids.length;
+        } else {
+          NODES.forEach(node => {
+            const mesh = nodeMeshMap.get(node.id);
+            if (mesh) mesh.material.color.setHex(stateColorHex(node.state));
+          });
+        }
+
         updateStatusBar(data);
+        refreshPanel();
       } catch (err) {
         console.warn('Poll failed:', err);
         document.getElementById('last-update').textContent = 'Connection lost — retrying…';
       }
     }
+
+    poll();
+    setInterval(poll, POLL_INTERVAL);
 
   </script>
 </body>
