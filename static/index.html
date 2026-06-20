@@ -1,17 +1,157 @@
 <!DOCTYPE html>
-<html>
-<head><title>Pipe Digital Twin</title></head>
-<body>
-  <h1>Pipe Segment Monitor</h1>
-  <pre id="output">Loading...</pre>
-  <script>
-    async function poll() {
-      const res = await fetch('/api/twin-state');
-      const data = await res.json();
-      document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pipe Digital Twin</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      background: #0f1117;
+      color: #e0e0e0;
+      display: flex;
+      flex-direction: column;
     }
-    poll();
-    setInterval(poll, 3000);
+
+    /* ── Header ── */
+    #header {
+      background: #1a1d27;
+      padding: 12px 20px;
+      border-bottom: 1px solid #2a2d3e;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+      z-index: 10;
+    }
+    #header h1 { font-size: 17px; font-weight: 600; color: #fff; letter-spacing: 0.3px; }
+
+    /* ── Map ── */
+    #map { flex: 1; }
+
+    /* ── MapLibre popup overrides ── */
+    .maplibregl-popup-content {
+      background: #1a1d27;
+      color: #e0e0e0;
+      border: 1px solid #2a2d3e;
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: 13px;
+      line-height: 1.7;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: #1a1d27; }
+    .maplibregl-popup-anchor-top    .maplibregl-popup-tip { border-bottom-color: #1a1d27; }
+    .maplibregl-popup-close-button { color: #9e9e9e; font-size: 18px; padding: 4px 8px; }
+    .maplibregl-popup-close-button:hover { color: #fff; background: transparent; }
+  </style>
+</head>
+<body>
+
+  <div id="header">
+    <span style="font-size:22px">🔧</span>
+    <h1>Pipe Digital Twin — Pipeline Monitor</h1>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script>
+
+    // ── HARDCODED DATA (temporary — will be replaced with live sensor feed) ──────
+    const NODES = [
+      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: 67.5, trend: "stable" },
+      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal", temp: 68.0, trend: "stable" },
+      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal", temp: 66.5, trend: "stable" },
+    ];
+
+    // Full pipeline route — all nodes lie along this path
+    const PIPELINE_PATH = [
+      [32.844, 39.932],   // pipeline start
+      [32.850, 39.930],   // Node A
+      [32.865, 39.925],   // Node B
+      [32.880, 39.920],   // Node C
+      [32.886, 39.918],   // pipeline end
+    ];
+
+    // ── MAP INITIALISATION ────────────────────────────────────────────────────────
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: {
+        version: 8,
+        sources: {
+          osm: {
+            type: 'raster',
+            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+            tileSize: 256,
+            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          }
+        },
+        layers: [{ id: 'osm-raster', type: 'raster', source: 'osm' }]
+      },
+      center: [32.865, 39.925],
+      zoom: 13
+    });
+
+    map.addControl(new maplibregl.NavigationControl(), 'top-right');
+    map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+
+    map.on('load', () => {
+
+      // ── PIPELINE LINE ──────────────────────────────────────────────────────────
+      map.addSource('pipeline', {
+        type: 'geojson',
+        data: {
+          type: 'Feature',
+          geometry: { type: 'LineString', coordinates: PIPELINE_PATH }
+        }
+      });
+
+      // Soft glow behind the line for legibility on satellite-style tiles
+      map.addLayer({
+        id: 'pipeline-glow',
+        type: 'line',
+        source: 'pipeline',
+        paint: { 'line-color': '#ffffff', 'line-width': 14, 'line-opacity': 0.1 }
+      });
+
+      map.addLayer({
+        id: 'pipeline-line',
+        type: 'line',
+        source: 'pipeline',
+        paint: { 'line-color': '#4caf50', 'line-width': 6, 'line-cap': 'round', 'line-join': 'round' }
+      });
+
+      // ── NODE MARKERS ───────────────────────────────────────────────────────────
+      NODES.forEach(node => {
+        const el = document.createElement('div');
+        el.style.cssText = [
+          'width: 20px', 'height: 20px', 'border-radius: 50%',
+          'background: #4caf50', 'border: 3px solid #ffffff',
+          'box-shadow: 0 0 12px rgba(76,175,80,.8)',
+          'cursor: pointer', 'transition: transform .15s ease',
+        ].join(';');
+
+        el.addEventListener('mouseenter', () => el.style.transform = 'scale(1.35)');
+        el.addEventListener('mouseleave', () => el.style.transform = 'scale(1)');
+
+        const popup = new maplibregl.Popup({ offset: 22 }).setHTML(`
+          <strong style="font-size:14px">${node.name}</strong><br>
+          <span style="color:#aaa">Temperature:</span> <b>${node.temp}&nbsp;°C</b><br>
+          <span style="color:#aaa">State:</span> <b style="color:#4caf50">${node.state.toUpperCase()}</b><br>
+          <span style="color:#aaa">Trend:</span> ${node.trend}
+        `);
+
+        new maplibregl.Marker({ element: el })
+          .setLngLat([node.lng, node.lat])
+          .setPopup(popup)
+          .addTo(map);
+      });
+    });
+
   </script>
 </body>
 </html>
