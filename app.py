@@ -1,5 +1,9 @@
 from flask import Flask, jsonify, request, send_from_directory
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from config import SEGMENTS
 from sensor_reader import get_segment_status, start_sensor_thread, force_anomaly
@@ -23,6 +27,12 @@ def twin_state():
         "warnings": warnings,
         "rising_trends": rising,
         "timestamp": datetime.now().isoformat()
+    })
+
+@app.route('/api/config')
+def config():
+    return jsonify({
+        "camera_url": os.environ.get("PI_CAMERA_URL", "")
     })
 
 @app.route('/api/demo-anomaly', methods=['POST'])

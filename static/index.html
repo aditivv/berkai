@@ -150,8 +150,15 @@
       gap: 8px;
       color: #444;
       font-size: 12px;
+      overflow: hidden;
     }
     #camera-feed svg { opacity: .4; }
+    #camera-stream {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      border-radius: 5px;
+      display: none;
+    }
 
     /* Stats grid */
     .stat-grid {
@@ -272,16 +279,17 @@
         <span id="panel-badge" class="state-badge">—</span>
       </div>
 
-      <!-- Camera feed placeholder -->
+      <!-- Camera feed -->
       <div id="camera-wrap">
         <label>Camera Feed</label>
         <div id="camera-feed">
-          <!-- Camera icon -->
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <img id="camera-stream" alt="Live camera feed">
+          <!-- Placeholder shown when no stream URL is configured -->
+          <svg id="camera-icon" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
             <circle cx="12" cy="13" r="4"/>
           </svg>
-          <span>Live feed — hardware not connected</span>
+          <span id="camera-label">Live feed — hardware not connected</span>
         </div>
       </div>
 
@@ -322,6 +330,39 @@
 
     // ── CONSTANTS ─────────────────────────────────────────────────────────────────
     const POLL_INTERVAL = 3000;
+    let cameraUrl = '';
+
+    async function initCamera() {
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        cameraUrl = cfg.camera_url || '';
+        if (cameraUrl) {
+          const img = document.getElementById('camera-stream');
+          img.src = cameraUrl;
+          img.onerror = () => {
+            cameraUrl = '';
+            showCameraPlaceholder('Stream unavailable — check PI_CAMERA_URL');
+          };
+        }
+      } catch (e) {
+        console.warn('Could not load camera config', e);
+      }
+    }
+
+    function showCameraStream() {
+      document.getElementById('camera-stream').style.display = 'block';
+      document.getElementById('camera-icon').style.display  = 'none';
+      document.getElementById('camera-label').style.display = 'none';
+    }
+
+    function showCameraPlaceholder(msg) {
+      document.getElementById('camera-stream').style.display = 'none';
+      document.getElementById('camera-icon').style.display  = '';
+      document.getElementById('camera-label').style.display = '';
+      if (msg) document.getElementById('camera-label').textContent = msg;
+    }
+
 
     const STATE_COLOR = { normal: '#4caf50', warning: '#ff9800', anomaly: '#f44336', unknown: '#9e9e9e' };
     function stateColor(s) { return STATE_COLOR[s] ?? STATE_COLOR.unknown; }
@@ -426,7 +467,8 @@
         markerEls.set(node.id, el);
       });
 
-      // Start polling
+      // Start polling and init camera
+      initCamera();
       poll();
       setInterval(poll, POLL_INTERVAL);
     });
@@ -436,7 +478,8 @@
       selectedNodeId = nodeId;
       document.getElementById('panel-hint').classList.add('hidden');
       document.getElementById('panel').classList.add('open');
-      map.resize();   // recalculate map width after panel opens
+      map.resize();
+      if (cameraUrl) showCameraStream(); else showCameraPlaceholder();
       refreshPanel();
     }
 
