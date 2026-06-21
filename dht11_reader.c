@@ -168,9 +168,18 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
             continue; /* unrelated pulse, ignore without consuming a slot */
         }
 
-        uint64_t ts = now_ns();  /* timestamp first — input() call below is not timing-critical */
+        uint64_t ts = now_ns();  /* timestamp first — calls below are not timing-critical */
         unsigned level = GPIO_LOW;
         rpi_gpio_input(dht_pin, &level);  /* current level right after the edge tells us its direction */
+
+        /* Re-arm after every edge. Both test runs died at exactly edge
+         * 65/83 with near-identical timing — consistent with a single
+         * add_event_detect registration having a limited delivery
+         * capacity (e.g. a default ~64-deep pulse queue) rather than
+         * persisting for the whole 83-edge frame. Cheap to re-register
+         * here since we're already paying for one rpi_gpio_input() call
+         * per edge; if this pushes the failure past 65, it confirms it. */
+        rpi_gpio_add_event_detect(dht_pin, coid, GPIO_RISING | GPIO_FALLING, EVENT_ID_EDGE);
 
         edges[got].ts_ns = ts;
         edges[got].is_rising = (level == GPIO_HIGH) ? 1 : 0;
