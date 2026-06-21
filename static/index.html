@@ -424,11 +424,11 @@
           'width:20px', 'height:20px', 'border-radius:50%',
           `background:${stateColor(node.state)}`, 'border:3px solid #fff',
           `box-shadow:${stateGlow(node.state)}`,
-          'cursor:pointer', 'transition:transform .15s ease, box-shadow .3s ease',
+          'cursor:pointer', 'transition:box-shadow .3s ease, outline .1s ease',
         ].join(';');
 
-        el.addEventListener('mouseenter', () => el.style.transform = 'scale(1.35)');
-        el.addEventListener('mouseleave', () => el.style.transform = 'scale(1)');
+        el.addEventListener('mouseenter', () => el.style.outline = '3px solid rgba(255,255,255,0.7)');
+        el.addEventListener('mouseleave', () => el.style.outline = '');
         el.addEventListener('click', () => openPanel(node.id));
 
         new maplibregl.Marker({ element: el })
