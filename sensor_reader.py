@@ -1,7 +1,6 @@
 import threading
 import random
 import time
-import serial
 from datetime import datetime
 from config import SEGMENTS
 
@@ -25,28 +24,6 @@ def simulate_sensors():
                 new_temp = current + drift
                 record_segment_reading(seg_id, new_temp)
         time.sleep(3)
-
-# ── REAL ARDUINO MODE (use this once hardware is wired) ──
-
-def read_arduino(port='/dev/ttyACM0'):
-    try:
-        ser = serial.Serial(port, 9600, timeout=2)
-        print(f"Arduino connected on {port}")
-    except Exception as e:
-        print(f"Arduino not found ({e}) — falling back to simulation")
-        simulate_sensors()
-        return
-
-    while True:
-        try:
-            line = ser.readline().decode('utf-8').strip()
-            if line.startswith("SEGMENT:"):
-                parts = line.split(":")
-                segment_id = int(parts[1])
-                temp = float(parts[2])
-                record_segment_reading(segment_id, temp)
-        except Exception as e:
-            print(f"Read error: {e}")
 
 # ── SHARED LOGIC ─────────────────────────────────────────
 
@@ -102,7 +79,6 @@ def force_anomaly(segment_id):
         spike = SEGMENTS[segment_id]["temp_normal"][1] + 15
         record_segment_reading(segment_id, spike)
 
-def start_sensor_thread(use_arduino=True):
-    target = read_arduino if use_arduino else simulate_sensors
-    t = threading.Thread(target=target, daemon=True)
+def start_sensor_thread():
+    t = threading.Thread(target=simulate_sensors, daemon=True)
     t.start()

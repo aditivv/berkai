@@ -63,5 +63,5 @@ def demo_anomaly():
     return jsonify({"ok": True, "segment_id": segment_id})
 
 if __name__ == '__main__':
-    start_sensor_thread(use_arduino=True)
+    start_sensor_thread()
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
