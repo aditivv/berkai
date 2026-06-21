@@ -307,6 +307,11 @@
           <div class="value" id="panel-range" style="font-size:14px;padding-top:4px">—</div>
           <div class="unit">°C</div>
         </div>
+        <div class="stat-box" id="panel-humidity-box" style="display:none">
+          <div class="label">Humidity</div>
+          <div class="value" id="panel-humidity">—</div>
+          <div class="unit">%</div>
+        </div>
       </div>
 
       <!-- Trend -->
@@ -340,9 +345,9 @@
 
     // ── NODE DEFINITIONS (positions fixed; state/temp overwritten by API) ─────────
     const NODES = [
-      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
-      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
-      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal", temp: null, trend: "—", temp_normal: [60, 75] },
+      { id: 0, name: "Segment A — Near Intake",  lng: 32.850, lat: 39.930, state: "normal", temp: null, humidity: null, trend: "—", temp_normal: [60, 75] },
+      { id: 1, name: "Segment B — Mid Run",       lng: 32.865, lat: 39.925, state: "normal", temp: null, humidity: null, trend: "—", temp_normal: [60, 75] },
+      { id: 2, name: "Segment C — Near Outflow",  lng: 32.880, lat: 39.920, state: "normal", temp: null, humidity: null, trend: "—", temp_normal: [60, 75] },
     ];
 
     const SEGMENT_PIPES = [
@@ -482,6 +487,13 @@
         node.temp_normal ? `${node.temp_normal[0]}–${node.temp_normal[1]}` : '—';
       document.getElementById('panel-trend').textContent = node.trend || '—';
 
+      // Only the segment wired to the physical DHT11 sensor reports humidity
+      const humidityBox = document.getElementById('panel-humidity-box');
+      humidityBox.style.display = node.humidity != null ? '' : 'none';
+      if (node.humidity != null) {
+        document.getElementById('panel-humidity').textContent = node.humidity;
+      }
+
       // Tint the camera placeholder border to match state
       document.getElementById('camera-feed').style.borderColor =
         node.state !== 'normal' ? `${color}66` : '#2a2d3e';
@@ -549,6 +561,7 @@
           if (!seg) return;
           node.state      = seg.state;
           node.temp       = seg.temp;
+          node.humidity   = seg.humidity;
           node.trend      = seg.trend;
           node.last_seen  = seg.last_seen;
           if (seg.temp_normal) node.temp_normal = seg.temp_normal;

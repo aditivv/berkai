@@ -1,12 +1,62 @@
 import threading
 import random
 import time
+import os
+import subprocess
 from datetime import datetime
 from config import SEGMENTS
 
 segment_readings = {}
 reading_history = {}
 lock = threading.RLock()
+
+# ── DHT11 TEMPERATURE/HUMIDITY SENSOR ───────────────────
+# Reads come from the compiled dht11_reader C binary (see dht11_reader.c —
+# it talks to the QNX GPIO resource manager directly; this is just a thin
+# subprocess wrapper around it). On the laptop, where that binary doesn't
+# exist, DHT11_ENABLED is False and DHT11_SEGMENT_ID just stays simulated —
+# no code changes needed to run this file off the Pi.
+
+DHT11_BINARY_PATH = os.environ.get("DHT11_BINARY_PATH", "./dht11_reader")
+DHT11_GPIO_PIN = int(os.environ.get("DHT11_GPIO_PIN", "17"))
+DHT11_SEGMENT_ID = int(os.environ.get("DHT11_SEGMENT_ID", "0"))
+DHT11_POLL_INTERVAL = int(os.environ.get("DHT11_POLL_INTERVAL", "2"))  # seconds; DHT11 wants >=1s between reads
+
+DHT11_ENABLED = os.path.exists(DHT11_BINARY_PATH)
+
+
+def read_dht11_once():
+    """Run the compiled dht11_reader binary once. Returns (humidity, temp) or None on failure."""
+    try:
+        result = subprocess.run(
+            [DHT11_BINARY_PATH, str(DHT11_GPIO_PIN)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        print(f"[dht11] could not run {DHT11_BINARY_PATH}: {e}")
+        return None
+
+    if result.returncode != 0:
+        if result.stderr:
+            print(f"[dht11] read failed: {result.stderr.strip()}")
+        return None
+
+    try:
+        humidity_str, temp_str = result.stdout.strip().split(",")
+        return int(humidity_str), int(temp_str)
+    except ValueError:
+        print(f"[dht11] unexpected output: {result.stdout!r}")
+        return None
+
+
+def dht11_polling_loop():
+    """Background thread: poll the physical DHT11 sensor, feed DHT11_SEGMENT_ID."""
+    while True:
+        reading = read_dht11_once()
+        if reading is not None:
+            humidity, temp = reading
+            record_segment_reading(DHT11_SEGMENT_ID, temp, humidity)
+        time.sleep(DHT11_POLL_INTERVAL)
 
 # ── VISUAL DETECTION FLAGS ────────────────────────────────
 # Set by the AI triage thread in app.py every 10 s.
@@ -32,12 +82,16 @@ def set_visual_flag(segment_id, detected_labels):
 def simulate_sensors():
     with lock:
         for seg_id, seg in SEGMENTS.items():
+            if DHT11_ENABLED and seg_id == DHT11_SEGMENT_ID:
+                continue  # real DHT11 readings own this segment; see dht11_polling_loop
             mid = (seg["temp_normal"][0] + seg["temp_normal"][1]) / 2
-            segment_readings[seg_id] = {"temp": mid, "last_seen": datetime.now().isoformat()}
+            segment_readings[seg_id] = {"temp": mid, "humidity": None, "last_seen": datetime.now().isoformat()}
 
     while True:
         with lock:
             for seg_id in SEGMENTS:
+                if DHT11_ENABLED and seg_id == DHT11_SEGMENT_ID:
+                    continue
                 current = segment_readings[seg_id]["temp"]
                 drift = random.uniform(-0.5, 0.5)
                 new_temp = current + drift
@@ -46,10 +100,15 @@ def simulate_sensors():
 
 # ── SHARED LOGIC ─────────────────────────────────────────
 
-def record_segment_reading(segment_id, temp):
+def record_segment_reading(segment_id, temp, humidity=None):
     with lock:
         now = datetime.now().isoformat()
-        segment_readings[segment_id] = {"temp": temp, "last_seen": now}
+        existing = segment_readings.get(segment_id, {})
+        segment_readings[segment_id] = {
+            "temp": temp,
+            "humidity": humidity if humidity is not None else existing.get("humidity"),
+            "last_seen": now,
+        }
         reading_history.setdefault(segment_id, []).append({"temp": temp, "time": now})
         reading_history[segment_id] = reading_history[segment_id][-50:]
 
@@ -91,6 +150,7 @@ def get_segment_status():
             status[seg_id] = {
                 **seg,
                 "temp": round(temp, 1) if temp else None,
+                "humidity": reading.get("humidity") if reading else None,
                 "state": state,
                 "trend": get_trend(seg_id),
                 "last_seen": reading["last_seen"] if reading else None,
@@ -107,3 +167,9 @@ def force_anomaly(segment_id):
 def start_sensor_thread():
     t = threading.Thread(target=simulate_sensors, daemon=True)
     t.start()
+    if DHT11_ENABLED:
+        dht_thread = threading.Thread(target=dht11_polling_loop, daemon=True)
+        dht_thread.start()
+        print(f"[dht11] polling enabled on segment {DHT11_SEGMENT_ID} via {DHT11_BINARY_PATH} (GPIO {DHT11_GPIO_PIN})")
+    else:
+        print(f"[dht11] disabled — binary not found at {DHT11_BINARY_PATH} (expected when running off the Pi)")
