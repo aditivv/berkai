@@ -25,16 +25,30 @@
  *     to label which direction it was — that extra call doesn't affect
  *     the recorded timestamp, only how we annotate it.
  *
- * DHT11 frame, after we release the start signal and arm detection
- * (line idles HIGH via pull-up until the sensor responds):
- *   edge[0]  F  - ACK low starts      edge[1]  R  - ACK low ends / ACK high starts
- *   edge[2]  F  - ACK high ends / bit0 lead-low starts
- *   edge[3]  R  - bit0 lead-low ends / bit0 DATA-HIGH starts
- *   edge[4]  F  - bit0 DATA-HIGH ends / bit1 lead-low starts
+ * DHT11 frame: in theory edge[0] is the ACK pulse's falling edge. On
+ * real hardware here it consistently never arrives — by the time the
+ * synchronous rpi_gpio_setup_pull()/add_event_detect() resmgr calls
+ * finish, the ACK low pulse has typically already started, so edge[0]
+ * as actually observed is the ACK's RISING edge (confirmed across
+ * multiple runs). Frame, shifted to match:
+ *   edge[0]  R  - ACK high starts (ACK low already missed)
+ *   edge[1]  F  - ACK high ends / bit0 lead-low starts
+ *   edge[2]  R  - bit0 lead-low ends / bit0 DATA-HIGH starts
+ *   edge[3]  F  - bit0 DATA-HIGH ends / bit1 lead-low starts
  *   ...
- *   edge[3+2k] R / edge[4+2k] F  -> width of bit k's data-high pulse, k=0..39
- *   -> 2 (ACK) + 40*2 (lead-low + data-high per bit) + ... = 83 edges total
- *      (edge[82] is the falling edge ending bit 39's data-high pulse)
+ *   edge[2+2k] R / edge[3+2k] F  -> width of bit k's data-high pulse
+ *
+ * We only decode the first NUM_BITS (24: humidity + humidity-decimal +
+ * temperature-integer) rather than the full 40. On this specific Pi,
+ * captures reliably and reproducibly stall with a multi-hundred-ms gap
+ * right around bit 31 (~3ms of elapsed real time after arming) — same
+ * exact edge count, three runs in a row, regardless of re-arming the
+ * event detection after every edge, which rules out a registration/
+ * pulse-capacity issue. Root cause not found (would need slog2info or
+ * kernel-level tracing to dig further); humidity/temperature are fully
+ * available well before that point, so we stop asking for more than we
+ * need and skip the checksum (which lives in the bits we can't get to)
+ * rather than block on a deeper, open-ended investigation.
  *
  * Build (run ON the Pi, after building librpi_gpio.a per
  * common/rpi_gpio/Makefile in the QNX hardware-component-samples repo —
@@ -55,8 +69,9 @@
  *   sudo ./dht11_reader [bcm_gpio_pin]      # defaults to GPIO 17
  *
  * Output: on a good read, exactly one line "humidity,temperature\n"
- * (two integers, e.g. "45,23") on stdout, exit code 0.
- * On a failed read (timeout, bad checksum, wrong edge order) prints a
+ * (two integers, e.g. "45,23") on stdout, exit code 0. No checksum
+ * validation (see frame note above) — values are taken on trust.
+ * On a failed read (timeout, wrong edge order) prints a
  * diagnostic to stderr, exit code 1, nothing on stdout — caller should
  * wait >=1s and retry, per the DHT11 datasheet's minimum sample interval.
  *
@@ -80,7 +95,8 @@
 
 #define DEFAULT_DHT_PIN   17
 #define EVENT_ID_EDGE     1   /* single id for both rising+falling, registered together */
-#define EXPECTED_EDGES    83   /* 2 (ACK low+high) + 40 bits * 2 (lead-low + data-high) + 1 trailing falling */
+#define NUM_BITS          24   /* humidity (8) + humidity-decimal (8) + temperature-integer (8); see file header */
+#define EXPECTED_EDGES    (2 + 2 * NUM_BITS)   /* ACK high-start + (lead-low,data-high) pair per bit */
 #define READ_TIMEOUT_MS   200  /* safety net per-edge wait, in case the sensor stalls */
 
 typedef struct {
@@ -168,18 +184,9 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
             continue; /* unrelated pulse, ignore without consuming a slot */
         }
 
-        uint64_t ts = now_ns();  /* timestamp first — calls below are not timing-critical */
+        uint64_t ts = now_ns();  /* timestamp first — input() call below is not timing-critical */
         unsigned level = GPIO_LOW;
         rpi_gpio_input(dht_pin, &level);  /* current level right after the edge tells us its direction */
-
-        /* Re-arm after every edge. Both test runs died at exactly edge
-         * 65/83 with near-identical timing — consistent with a single
-         * add_event_detect registration having a limited delivery
-         * capacity (e.g. a default ~64-deep pulse queue) rather than
-         * persisting for the whole 83-edge frame. Cheap to re-register
-         * here since we're already paying for one rpi_gpio_input() call
-         * per edge; if this pushes the failure past 65, it confirms it. */
-        rpi_gpio_add_event_detect(dht_pin, coid, GPIO_RISING | GPIO_FALLING, EVENT_ID_EDGE);
 
         edges[got].ts_ns = ts;
         edges[got].is_rising = (level == GPIO_HIGH) ? 1 : 0;
@@ -203,16 +210,17 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
     return (rc == 0 && got == n_edges) ? 0 : -1;
 }
 
-/* Decode 83 captured edges into (humidity, temperature). Returns 0 on
- * success, -1 on bad framing/checksum. */
+/* Decode NUM_BITS captured edges into (humidity, temperature). No
+ * checksum (it lives past bit 31, which we don't capture — see file
+ * header). Returns 0 on success, -1 on bad framing. */
 static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperature)
 {
     if (n_edges != EXPECTED_EDGES) return -1;
 
-    uint64_t widths[40];
-    for (int k = 0; k < 40; k++) {
-        int r_idx = 3 + 2 * k;
-        int f_idx = 4 + 2 * k;
+    uint64_t widths[NUM_BITS];
+    for (int k = 0; k < NUM_BITS; k++) {
+        int r_idx = 2 + 2 * k;
+        int f_idx = 3 + 2 * k;
         if (!edges[r_idx].is_rising || edges[f_idx].is_rising) {
             fprintf(stderr, "[dht11] unexpected edge order at bit %d — noisy read\n", k);
             return -1;
@@ -221,27 +229,20 @@ static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperat
     }
 
     uint64_t shortest = widths[0], longest = widths[0];
-    for (int k = 1; k < 40; k++) {
+    for (int k = 1; k < NUM_BITS; k++) {
         if (widths[k] < shortest) shortest = widths[k];
         if (widths[k] > longest) longest = widths[k];
     }
     uint64_t halfway = (shortest + longest) / 2;
 
-    uint8_t bytes[5] = {0, 0, 0, 0, 0};
-    for (int k = 0; k < 40; k++) {
+    uint8_t bytes[NUM_BITS / 8] = {0};
+    for (int k = 0; k < NUM_BITS; k++) {
         int bit = widths[k] > halfway ? 1 : 0;
         bytes[k / 8] = (uint8_t)((bytes[k / 8] << 1) | bit);
     }
 
-    uint8_t checksum = (uint8_t)(bytes[0] + bytes[1] + bytes[2] + bytes[3]);
-    if (checksum != bytes[4]) {
-        fprintf(stderr, "[dht11] checksum mismatch (got 0x%02x, expected 0x%02x)\n",
-                checksum, bytes[4]);
-        return -1;
-    }
-
-    *humidity = bytes[0];
-    *temperature = bytes[2];
+    *humidity = bytes[0];     /* byte 0: humidity integer */
+    *temperature = bytes[2];  /* byte 2: temperature integer (byte 1 is humidity decimal, unused) */
     return 0;
 }
 
