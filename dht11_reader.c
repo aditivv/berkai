@@ -148,6 +148,7 @@ static int capture_edges(int dht_pin, edge_t *edges, int n_edges)
         rc = -1;
     }
 
+    uint64_t armed_ns = now_ns();
     int got = 0;
     while (rc == 0 && got < n_edges) {
         struct _pulse pulse;
@@ -176,6 +177,20 @@ static int capture_edges(int dht_pin, edge_t *edges, int n_edges)
             got++;
         }
         /* else: unrelated pulse, ignore without consuming a slot */
+    }
+
+    /* Always dump what we actually saw to stderr — doesn't touch stdout,
+     * so it's safe even when called from sensor_reader.py's subprocess
+     * wrapper. This is the actual diagnostic: distinguishes real noise
+     * (many sub-microsecond-spaced edges) from a genuinely stuck line
+     * (one huge gap) from a clean signal that just stopped partway. */
+    fprintf(stderr, "[dht11] captured %d edge(s):\n", got);
+    uint64_t prev_ns = armed_ns;
+    for (int i = 0; i < got; i++) {
+        double delta_us = (double)(edges[i].ts_ns - prev_ns) / 1000.0;
+        fprintf(stderr, "  edge[%2d] %s  +%.1fus since previous\n",
+                i, edges[i].is_rising ? "RISING " : "FALLING", delta_us);
+        prev_ns = edges[i].ts_ns;
     }
 
     ConnectDetach(coid);
