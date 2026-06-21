@@ -130,23 +130,15 @@ static int send_start_signal(int dht_pin)
 }
 
 /* Collect EXPECTED_EDGES timestamped rising/falling events on dht_pin via
- * QNX pulses (no rpi_gpio_input() polling). A fresh channel is created
- * per call so stale events from a previous read cycle can't bleed in.
- * Returns 0 on success, -1 on timeout/error. */
-static int capture_edges(int dht_pin, edge_t *edges, int n_edges)
+ * QNX pulses (no rpi_gpio_input() polling). chid/coid are created by the
+ * caller *before* driving the start signal, so the only thing happening
+ * between "switch pin to input" and "armed" is this one registration
+ * call — minimizing the chance of missing the sensor's first transition,
+ * which is what a ChannelCreate/ConnectAttach done at this point (i.e.
+ * after the start signal) was costing us. Returns 0 on success, -1 on
+ * timeout/error. */
+static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_edges)
 {
-    int chid = ChannelCreate(0);
-    if (chid == -1) {
-        perror("ChannelCreate");
-        return -1;
-    }
-    int coid = ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
-    if (coid == -1) {
-        perror("ConnectAttach");
-        ChannelDestroy(chid);
-        return -1;
-    }
-
     int rc = 0;
     if (rpi_gpio_add_event_detect(dht_pin, coid, GPIO_RISING | GPIO_FALLING, EVENT_ID_EDGE) != GPIO_SUCCESS) {
         fprintf(stderr, "[dht11] add_event_detect(RISING|FALLING) failed\n");
@@ -199,8 +191,6 @@ static int capture_edges(int dht_pin, edge_t *edges, int n_edges)
         prev_ns = edges[i].ts_ns;
     }
 
-    ConnectDetach(coid);
-    ChannelDestroy(chid);
     return (rc == 0 && got == n_edges) ? 0 : -1;
 }
 
@@ -255,14 +245,34 @@ int main(int argc, char **argv)
 
     boost_priority();
 
+    /* Create the channel/connection *before* touching the pin at all, so
+     * the only thing standing between "switch to input" and "armed" is
+     * the single add_event_detect call inside capture_edges(). */
+    int chid = ChannelCreate(0);
+    if (chid == -1) {
+        perror("ChannelCreate");
+        return 1;
+    }
+    int coid = ConnectAttach(0, 0, chid, _NTO_SIDE_CHANNEL, 0);
+    if (coid == -1) {
+        perror("ConnectAttach");
+        ChannelDestroy(chid);
+        return 1;
+    }
+
     if (send_start_signal(dht_pin) != 0) {
         fprintf(stderr, "[dht11] failed to drive start signal on GPIO %d\n", dht_pin);
+        ConnectDetach(coid);
+        ChannelDestroy(chid);
         rpi_gpio_cleanup();
         return 1;
     }
 
     edge_t edges[EXPECTED_EDGES];
-    if (capture_edges(dht_pin, edges, EXPECTED_EDGES) != 0) {
+    int capture_rc = capture_edges(dht_pin, chid, coid, edges, EXPECTED_EDGES);
+    ConnectDetach(coid);
+    ChannelDestroy(chid);
+    if (capture_rc != 0) {
         fprintf(stderr, "[dht11] failed to capture a full edge sequence\n");
         rpi_gpio_cleanup();
         return 1;
