@@ -20,6 +20,7 @@ app = Flask(__name__, static_folder='static')
 try:
     import qnx_apis
     _VideoCapture = qnx_apis.VideoCapture
+    print(_VideoCapture)
 except ImportError:
     print("qnx_apis not found — falling back to cv2.VideoCapture (won't see the Pi camera on QNX)")
     _VideoCapture = cv2.VideoCapture
@@ -28,6 +29,8 @@ _camera = None
 
 def _get_camera():
     global _camera
+    # list all cameras available
+    
     if _camera is None or not _camera.isOpened():
         _camera = _VideoCapture(0)
     return _camera
