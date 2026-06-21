@@ -1,110 +1,101 @@
 """
-AI triage — runs a YOLO defect-detection model (cracks / corrosion / leaks)
-against camera frames and reports back what it finds.
+AI triage — OpenCV-based crack detection in pipe camera frames.
 
-Weights path is configurable via the YOLO_WEIGHTS_PATH env var, defaulting to
-runs/detect/train/weights/best.pt (ultralytics' default training output
-location). If ultralytics isn't installed, or the weights file doesn't exist
-yet, detection is silently disabled — the rest of the app (camera feed,
-temperature monitoring) keeps working without it.
+Uses edge detection + contour geometry to find elongated, crack-like features.
+No ML model or internet connection required — works with cv2 only.
+
+Tunable via environment variables:
+  CRACK_MIN_AREA       minimum contour area in pixels     (default 200)
+  CRACK_ASPECT_RATIO   min length/width ratio for a crack (default 3.5)
+  CRACK_CANNY_LOW      Canny lower threshold              (default 50)
+  CRACK_CANNY_HIGH     Canny upper threshold              (default 150)
 """
 
 import os
-import threading
+import cv2
+import numpy as np
 
-WEIGHTS_PATH = os.environ.get("YOLO_WEIGHTS_PATH", "runs/detect/train/weights/best.pt")
-CONFIDENCE_THRESHOLD = float(os.environ.get("YOLO_CONFIDENCE", "0.4"))
-
-_model = None
-_model_lock = threading.Lock()
-_load_attempted = False
-_disabled_reason = None
-
-
-def _try_load_model():
-    """Lazily load the YOLO model on first use. Thread-safe, idempotent."""
-    global _model, _load_attempted, _disabled_reason
-
-    with _model_lock:
-        if _load_attempted:
-            return
-        _load_attempted = True
-
-        try:
-            from ultralytics import YOLO
-        except ImportError:
-            _disabled_reason = "ultralytics not installed — pip install ultralytics"
-            print(f"[ai_triage] disabled: {_disabled_reason}")
-            return
-
-        if not os.path.exists(WEIGHTS_PATH):
-            _disabled_reason = f"no weights found at {WEIGHTS_PATH} — train a model first"
-            print(f"[ai_triage] disabled: {_disabled_reason}")
-            return
-
-        try:
-            _model = YOLO(WEIGHTS_PATH)
-            print(f"[ai_triage] loaded model from {WEIGHTS_PATH}")
-        except Exception as e:
-            _disabled_reason = f"failed to load model: {e}"
-            print(f"[ai_triage] disabled: {_disabled_reason}")
+CRACK_MIN_AREA     = int(os.environ.get("CRACK_MIN_AREA",     "200"))
+CRACK_ASPECT_RATIO = float(os.environ.get("CRACK_ASPECT_RATIO", "3.5"))
+CRACK_CANNY_LOW    = int(os.environ.get("CRACK_CANNY_LOW",    "50"))
+CRACK_CANNY_HIGH   = int(os.environ.get("CRACK_CANNY_HIGH",   "150"))
 
 
 def is_enabled():
-    """Whether detection is actually available right now."""
-    _try_load_model()
-    return _model is not None
+    return True
 
 
 def disabled_reason():
-    """Human-readable reason detection is unavailable, or None if it's working."""
-    _try_load_model()
-    return _disabled_reason
+    return None
 
 
 def detect_defects(frame):
     """
-    Run detection on a single frame (numpy BGR array, as returned by
-    cv2.VideoCapture/qnx_apis.VideoCapture .read()).
+    Run OpenCV crack detection on a single BGR frame.
 
-    Returns a list of dicts: [{"label": str, "confidence": float,
-    "bbox": (x1, y1, x2, y2)}, ...]. Returns [] if detection is disabled
-    or no defects are found above the confidence threshold.
+    Returns a list of dicts: [{"label": "crack", "confidence": float,
+    "bbox": (x1, y1, x2, y2)}, ...].
+    Empty list means no cracks detected.
     """
-    _try_load_model()
-    if _model is None:
-        return []
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    results = _model.predict(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
+    # Enhance local contrast so cracks stand out against the pipe surface
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    # Smooth to reduce sensor noise before edge detection
+    blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+
+    # Detect edges
+    edges = cv2.Canny(blurred, CRACK_CANNY_LOW, CRACK_CANNY_HIGH)
+
+    # Dilate to join nearby edge fragments into continuous crack lines
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated = cv2.dilate(edges, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
     detections = []
-    for result in results:
-        for box in result.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            label = result.names[int(box.cls[0])]
-            confidence = float(box.conf[0])
-            detections.append({
-                "label": label,
-                "confidence": round(confidence, 3),
-                "bbox": (round(x1), round(y1), round(x2), round(y2)),
-            })
+    for cnt in contours:
+        if cv2.contourArea(cnt) < CRACK_MIN_AREA:
+            continue
+
+        # minAreaRect gives the true aspect ratio regardless of orientation
+        _, (w, h), _ = cv2.minAreaRect(cnt)
+        if min(w, h) == 0:
+            continue
+        aspect = max(w, h) / min(w, h)
+        if aspect < CRACK_ASPECT_RATIO:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(cnt)
+
+        # Confidence: normalise aspect ratio; higher aspect = more crack-like
+        confidence = round(min(aspect / 10.0, 1.0), 3)
+
+        detections.append({
+            "label": "crack",
+            "confidence": confidence,
+            "bbox": (x, y, x + bw, y + bh),
+        })
+
     return detections
 
 
 def annotate_frame(frame, detections):
     """
-    Draw bounding boxes + labels onto a copy of the frame for display.
-    Safe to call with an empty detections list (returns frame unchanged).
+    Draw bounding boxes + labels onto a copy of the frame.
+    Returns frame unchanged if detections is empty.
     """
     if not detections:
         return frame
 
-    import cv2
     annotated = frame.copy()
     for det in detections:
         x1, y1, x2, y2 = det["bbox"]
         color = (0, 0, 255) if det["confidence"] > 0.7 else (0, 165, 255)
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-        text = f'{det["label"]} {det["confidence"]:.0%}'
+        text = f'crack {det["confidence"]:.0%}'
         cv2.putText(annotated, text, (x1, max(y1 - 8, 0)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
     return annotated
