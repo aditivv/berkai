@@ -102,7 +102,7 @@ def force_anomaly(segment_id):
         spike = SEGMENTS[segment_id]["temp_normal"][1] + 15
         record_segment_reading(segment_id, spike)
 
-def start_sensor_thread(use_arduino=False):
+def start_sensor_thread(use_arduino=True):
     target = read_arduino if use_arduino else simulate_sensors
     t = threading.Thread(target=target, daemon=True)
     t.start()
