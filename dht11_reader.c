@@ -227,9 +227,11 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
 
 /* Decode one 8-bit byte from edges[start..start+15] (8 bit-pairs, R then
  * F each), using a caller-supplied threshold (computed globally across
- * the whole buffer, not just this window, for stability). Returns -1 if
- * start..start+15 doesn't land on a clean R,F,R,F,... run. */
-static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *byte_out)
+ * the whole buffer, not just this window, for stability). Also fills
+ * widths_out[0..7] with the raw pulse widths (ns) behind each bit, so a
+ * match can be visually double-checked rather than trusted blindly.
+ * Returns -1 if start..start+15 doesn't land on a clean R,F,R,F,... run. */
+static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *byte_out, uint64_t widths_out[8])
 {
     uint8_t byte = 0;
     for (int k = 0; k < 8; k++) {
@@ -239,6 +241,7 @@ static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *b
             return -1;
         }
         uint64_t width = edges[f_idx].ts_ns - edges[r_idx].ts_ns;
+        widths_out[k] = width;
         int bit = width > halfway ? 1 : 0;
         byte = (uint8_t)((byte << 1) | bit);
     }
@@ -246,18 +249,26 @@ static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *b
     return 0;
 }
 
+static void print_widths_us(uint64_t widths[8])
+{
+    for (int k = 0; k < 8; k++) {
+        fprintf(stderr, "%s%.1f", k == 0 ? "" : ",", (double)widths[k] / 1000.0);
+    }
+}
+
 /* No fixed byte structure assumed — slides an 8-bit window across every
- * valid starting position in the whole captured buffer and prints what
- * each one decodes to, since we no longer trust that "bit 0 of the
- * frame" lands at any single predictable edge index (see output history
- * in chat: humidity and temperature needed different, non-uniform
- * corrections, so a single shared offset can't be right for both).
- * HUMIDITY_HINT/TEMPERATURE_HINT (independently measured, not from this
- * sensor) are used only to flag which window(s) are worth trusting.
- * Returns 0 if anything in the buffer decoded cleanly at all. */
+ * valid starting position in the whole captured buffer. Rather than
+ * checking if a window's *value* is merely close to HUMIDITY_HINT/
+ * TEMPERATURE_HINT, this checks for an EXACT bit-pattern match against
+ * those known values (92 = 01011100, 12 = 00001100) — a much stronger
+ * signal, since matching the precise pattern of short/long pulses is
+ * far less likely to happen by chance than landing within +/-2 of a
+ * number. Prints the raw widths behind every exact match so it can be
+ * eyeballed, not just trusted. Returns 0 if at least one exact match
+ * was found for either value. */
 static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperature)
 {
-    int n_widths = (n_edges - 1) / 2;  /* number of valid (even,odd) R,F pairs available */
+    int n_widths = (n_edges - 1) / 2;
     uint64_t shortest = UINT64_MAX, longest = 0;
     for (int i = 0; i < n_widths; i++) {
         int r_idx = 2 * i, f_idx = 2 * i + 1;
@@ -269,23 +280,29 @@ static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperat
     uint64_t halfway = (shortest + longest) / 2;
 
     int humidity_match = -1, temperature_match = -1;
-    fprintf(stderr, "[dht11] scanning every 8-bit window (global threshold %lluus):\n",
+    fprintf(stderr, "[dht11] scanning for EXACT matches to humidity=92 (0x5c) / temp=12 (0x0c), threshold %lluus:\n",
             (unsigned long long)(halfway / 1000));
     for (int start = 0; start + 15 < n_edges; start += 2) {
         uint8_t byte;
-        if (decode_byte_at(edges, start, halfway, &byte) != 0) {
+        uint64_t widths[8];
+        if (decode_byte_at(edges, start, halfway, &byte, widths) != 0) {
             continue;
         }
-        int dist_h = abs((int)byte - HUMIDITY_HINT);
-        int dist_t = abs((int)byte - TEMPERATURE_HINT);
-        const char *tag = "";
-        if (dist_h <= 2) { tag = "  <-- near humidity hint (92)"; if (humidity_match == -1) humidity_match = byte; }
-        else if (dist_t <= 2) { tag = "  <-- near temperature hint (12)"; if (temperature_match == -1) temperature_match = byte; }
-        fprintf(stderr, "  start %2d: byte=%3u (0x%02x)%s\n", start, byte, byte, tag);
+        if (byte == HUMIDITY_HINT) {
+            fprintf(stderr, "  start %2d: byte=0x%02x == HUMIDITY_HINT exactly. Widths(us): ", start, byte);
+            print_widths_us(widths);
+            fprintf(stderr, "\n");
+            if (humidity_match == -1) humidity_match = byte;
+        } else if (byte == TEMPERATURE_HINT) {
+            fprintf(stderr, "  start %2d: byte=0x%02x == TEMPERATURE_HINT exactly. Widths(us): ", start, byte);
+            print_widths_us(widths);
+            fprintf(stderr, "\n");
+            if (temperature_match == -1) temperature_match = byte;
+        }
     }
 
     if (humidity_match == -1 && temperature_match == -1) {
-        fprintf(stderr, "[dht11] no window matched either hint\n");
+        fprintf(stderr, "[dht11] no window exactly matched either reference value\n");
         return -1;
     }
     *humidity = (humidity_match != -1) ? humidity_match : 0;
