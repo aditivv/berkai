@@ -25,30 +25,40 @@
  *     to label which direction it was — that extra call doesn't affect
  *     the recorded timestamp, only how we annotate it.
  *
- * DHT11 frame: in theory edge[0] is the ACK pulse's falling edge. On
- * real hardware here it consistently never arrives — by the time the
- * synchronous rpi_gpio_setup_pull()/add_event_detect() resmgr calls
- * finish, the ACK low pulse has typically already started, so edge[0]
- * as actually observed is the ACK's RISING edge (confirmed across
- * multiple runs). Frame, shifted to match:
- *   edge[0]  R  - ACK high starts (ACK low already missed)
- *   edge[1]  F  - ACK high ends / bit0 lead-low starts
- *   edge[2]  R  - bit0 lead-low ends / bit0 DATA-HIGH starts
- *   edge[3]  F  - bit0 DATA-HIGH ends / bit1 lead-low starts
- *   ...
- *   edge[2+2k] R / edge[3+2k] F  -> width of bit k's data-high pulse
+ * DHT11 frame, and why we no longer assume a fixed bit-offset:
+ * In theory edge[0] is the ACK pulse's falling edge, but on this Pi it
+ * never arrives — by the time the synchronous rpi_gpio_setup_pull()/
+ * add_event_detect() resmgr calls finish, the ACK low pulse has usually
+ * already started. We tried correcting for this with a single shared
+ * offset shifting the whole frame (assuming only the ACK was missed),
+ * but real measurements disproved that: with an independent thermometer
+ * reading ~12C/~92% RH for comparison, no single offset produced a
+ * plausible humidity AND temperature together — sliding the window
+ * within one byte's width just bit-rotates the same data, and the
+ * rotations never landed on 12. That means humidity and temperature
+ * need independent, non-uniform corrections (consistent with whatever
+ * is happening right after the ACK — edge[1] is suspiciously short,
+ * ~21us, matching neither the expected ~50us bit-separator nor the
+ * expected ~80us ACK-high — possibly corrupting just the first
+ * transmitted byte while leaving everything after it clean).
  *
- * We only decode the first NUM_BITS (24: humidity + humidity-decimal +
- * temperature-integer) rather than the full 40. On this specific Pi,
- * captures reliably and reproducibly stall with a multi-hundred-ms gap
+ * So instead of assuming any fixed frame structure, decode_edges() now
+ * slides an 8-bit window across the *entire* captured buffer and
+ * reports every possible byte value, flagging whichever ones land near
+ * HUMIDITY_HINT/TEMPERATURE_HINT (independently measured reference
+ * values, not from this sensor — supplied at the top of this file).
+ * This is a debugging tool, not a real deployment strategy: it only
+ * works because we have ground truth to compare against right now.
+ * Once we know which raw start-index reliably corresponds to which
+ * value, that should get hardcoded back into a real frame model.
+ *
+ * We also can't capture the full 40-bit frame at all: this Pi's
+ * capture reliably and reproducibly stalls with a multi-hundred-ms gap
  * right around bit 31 (~3ms of elapsed real time after arming) — same
  * exact edge count, three runs in a row, regardless of re-arming the
  * event detection after every edge, which rules out a registration/
  * pulse-capacity issue. Root cause not found (would need slog2info or
- * kernel-level tracing to dig further); humidity/temperature are fully
- * available well before that point, so we stop asking for more than we
- * need and skip the checksum (which lives in the bits we can't get to)
- * rather than block on a deeper, open-ended investigation.
+ * kernel-level tracing to dig further).
  *
  * Build (run ON the Pi, after building librpi_gpio.a per
  * common/rpi_gpio/Makefile in the QNX hardware-component-samples repo —
@@ -94,13 +104,15 @@
 #include "rpi_gpio.h"
 
 #define DEFAULT_DHT_PIN   17
-#define EVENT_ID_EDGE     1   /* single id for both rising+falling, registered together */
-#define NUM_BITS          24   /* humidity (8) + humidity-decimal (8) + temperature-integer (8); see file header */
-#define OFFSET_SLACK      16   /* extra edges captured so several start-offsets can be tried against one capture.
-                                 * 2*NUM_BITS+OFFSET_SLACK must stay under ~64 — this Pi's capture has reproducibly
-                                 * stalled past edge ~65 (see file header), so this is close to the ceiling. */
-#define EXPECTED_EDGES    (2 * NUM_BITS + OFFSET_SLACK)
+#define EVENT_ID_EDGE     1    /* single id for both rising+falling, registered together */
+#define EXPECTED_EDGES    60   /* as many raw edges as we can grab — this Pi's capture has reproducibly
+                                 * stalled past edge ~65 (see file header), so this stays under that ceiling */
 #define READ_TIMEOUT_MS   200  /* safety net per-edge wait, in case the sensor stalls */
+/* Known-good reference values for THIS test, from an independent thermometer/hygrometer reading
+ * (~12C, ~92% RH) — used only to find which sliding 8-bit window in the captured buffer is real
+ * data, by checking which window's value lands close to one of these, not as a permanent feature. */
+#define HUMIDITY_HINT     92
+#define TEMPERATURE_HINT  12
 
 typedef struct {
     uint64_t ts_ns;
@@ -213,90 +225,71 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
     return (rc == 0 && got == n_edges) ? 0 : -1;
 }
 
-/* Decode NUM_BITS bits starting at edges[start_offset] (bit k spans
- * edges[start_offset+2k] (R) to edges[start_offset+2k+1] (F)). No
- * checksum available (see file header) — instead, byte[1] (humidity-
- * decimal) is a strong correctness check on its own: DHT11 has no
- * fractional humidity precision, so a *correct* start_offset should
- * always decode it as exactly 0x00. Returns 0 if edge order is sane
- * (still doesn't guarantee start_offset is the right one — that's
- * what byte[1]==0 across several tried offsets is for). */
-static int decode_at(edge_t *edges, int start_offset, uint8_t bytes_out[NUM_BITS / 8])
+/* Decode one 8-bit byte from edges[start..start+15] (8 bit-pairs, R then
+ * F each), using a caller-supplied threshold (computed globally across
+ * the whole buffer, not just this window, for stability). Returns -1 if
+ * start..start+15 doesn't land on a clean R,F,R,F,... run. */
+static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *byte_out)
 {
-    uint64_t widths[NUM_BITS];
-    for (int k = 0; k < NUM_BITS; k++) {
-        int r_idx = start_offset + 2 * k;
-        int f_idx = start_offset + 2 * k + 1;
+    uint8_t byte = 0;
+    for (int k = 0; k < 8; k++) {
+        int r_idx = start + 2 * k;
+        int f_idx = start + 2 * k + 1;
         if (!edges[r_idx].is_rising || edges[f_idx].is_rising) {
-            return -1;  /* this offset doesn't land on a clean R,F pairing */
+            return -1;
         }
-        widths[k] = edges[f_idx].ts_ns - edges[r_idx].ts_ns;
+        uint64_t width = edges[f_idx].ts_ns - edges[r_idx].ts_ns;
+        int bit = width > halfway ? 1 : 0;
+        byte = (uint8_t)((byte << 1) | bit);
     }
-
-    uint64_t shortest = widths[0], longest = widths[0];
-    for (int k = 1; k < NUM_BITS; k++) {
-        if (widths[k] < shortest) shortest = widths[k];
-        if (widths[k] > longest) longest = widths[k];
-    }
-    uint64_t halfway = (shortest + longest) / 2;
-
-    memset(bytes_out, 0, NUM_BITS / 8);
-    for (int k = 0; k < NUM_BITS; k++) {
-        int bit = widths[k] > halfway ? 1 : 0;
-        bytes_out[k / 8] = (uint8_t)((bytes_out[k / 8] << 1) | bit);
-    }
+    *byte_out = byte;
     return 0;
 }
 
-/* Try a handful of start offsets against the same capture and print all
- * of them — DHT11's humidity-decimal byte (bytes[1]) must be 0x00 by
- * spec, so whichever offset gives that is almost certainly correct.
- * *humidity/*temperature are set from whichever offset matches that
- * check first; if none match, falls back to OFFSET_GUESS so there's
- * still output to look at. Returns 0 if any offset decoded cleanly. */
+/* No fixed byte structure assumed — slides an 8-bit window across every
+ * valid starting position in the whole captured buffer and prints what
+ * each one decodes to, since we no longer trust that "bit 0 of the
+ * frame" lands at any single predictable edge index (see output history
+ * in chat: humidity and temperature needed different, non-uniform
+ * corrections, so a single shared offset can't be right for both).
+ * HUMIDITY_HINT/TEMPERATURE_HINT (independently measured, not from this
+ * sensor) are used only to flag which window(s) are worth trusting.
+ * Returns 0 if anything in the buffer decoded cleanly at all. */
 static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperature)
 {
-    (void)n_edges;
-    int found_good = -1;
-    int found_plausible = -1;
+    int n_widths = (n_edges - 1) / 2;  /* number of valid (even,odd) R,F pairs available */
+    uint64_t shortest = UINT64_MAX, longest = 0;
+    for (int i = 0; i < n_widths; i++) {
+        int r_idx = 2 * i, f_idx = 2 * i + 1;
+        if (!edges[r_idx].is_rising || edges[f_idx].is_rising) continue;
+        uint64_t w = edges[f_idx].ts_ns - edges[r_idx].ts_ns;
+        if (w < shortest) shortest = w;
+        if (w > longest) longest = w;
+    }
+    uint64_t halfway = (shortest + longest) / 2;
 
-    fprintf(stderr, "[dht11] trying multiple bit-alignment offsets:\n");
-    for (int offset = 0; offset <= OFFSET_SLACK; offset++) {
-        uint8_t bytes[NUM_BITS / 8];
-        if (decode_at(edges, offset, bytes) != 0) {
-            fprintf(stderr, "  offset %2d: bad edge order\n", offset);
+    int humidity_match = -1, temperature_match = -1;
+    fprintf(stderr, "[dht11] scanning every 8-bit window (global threshold %lluus):\n",
+            (unsigned long long)(halfway / 1000));
+    for (int start = 0; start + 15 < n_edges; start += 2) {
+        uint8_t byte;
+        if (decode_byte_at(edges, start, halfway, &byte) != 0) {
             continue;
         }
-        /* DHT11 spec: 20-90% RH, 0-50C — widened a bit (5-95, 0-55) since
-         * clone sensors can run slightly out of spec. humidity_dec==0 is
-         * the spec-correct check but some clones populate that byte with
-         * ignorable junk, so plausibility of the *measurements* (not the
-         * unused decimal byte) is the more trustworthy signal here. */
-        int plausible = bytes[0] >= 5 && bytes[0] <= 95 && bytes[2] <= 55;
-        fprintf(stderr, "  offset %2d: humidity=%3u humidity_dec=0x%02x temp=%3u%s%s\n",
-                offset, bytes[0], bytes[1], bytes[2],
-                bytes[1] == 0 ? "  [dec=0x00]" : "",
-                plausible ? "  [PLAUSIBLE]" : "");
-        if (bytes[1] == 0 && found_good == -1) {
-            found_good = offset;
-        }
-        if (plausible && found_plausible == -1) {
-            found_plausible = offset;
-        }
+        int dist_h = abs((int)byte - HUMIDITY_HINT);
+        int dist_t = abs((int)byte - TEMPERATURE_HINT);
+        const char *tag = "";
+        if (dist_h <= 2) { tag = "  <-- near humidity hint (92)"; if (humidity_match == -1) humidity_match = byte; }
+        else if (dist_t <= 2) { tag = "  <-- near temperature hint (12)"; if (temperature_match == -1) temperature_match = byte; }
+        fprintf(stderr, "  start %2d: byte=%3u (0x%02x)%s\n", start, byte, byte, tag);
     }
 
-    int chosen = (found_plausible != -1) ? found_plausible : found_good;
-    if (chosen == -1) {
-        fprintf(stderr, "[dht11] no offset looked trustworthy by either check\n");
+    if (humidity_match == -1 && temperature_match == -1) {
+        fprintf(stderr, "[dht11] no window matched either hint\n");
         return -1;
     }
-
-    uint8_t bytes[NUM_BITS / 8];
-    decode_at(edges, chosen, bytes);
-    *humidity = bytes[0];
-    *temperature = bytes[2];
-    fprintf(stderr, "[dht11] using offset %d (%s)\n", chosen,
-            found_plausible != -1 ? "plausibility check" : "humidity_dec==0x00 fallback");
+    *humidity = (humidity_match != -1) ? humidity_match : 0;
+    *temperature = (temperature_match != -1) ? temperature_match : 0;
     return 0;
 }
 
