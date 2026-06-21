@@ -25,40 +25,33 @@
  *     to label which direction it was — that extra call doesn't affect
  *     the recorded timestamp, only how we annotate it.
  *
- * DHT11 frame, and why we no longer assume a fixed bit-offset:
- * In theory edge[0] is the ACK pulse's falling edge, but on this Pi it
- * never arrives — by the time the synchronous rpi_gpio_setup_pull()/
- * add_event_detect() resmgr calls finish, the ACK low pulse has usually
- * already started. We tried correcting for this with a single shared
- * offset shifting the whole frame (assuming only the ACK was missed),
- * but real measurements disproved that: with an independent thermometer
- * reading ~12C/~92% RH for comparison, no single offset produced a
- * plausible humidity AND temperature together — sliding the window
- * within one byte's width just bit-rotates the same data, and the
- * rotations never landed on 12. That means humidity and temperature
- * need independent, non-uniform corrections (consistent with whatever
- * is happening right after the ACK — edge[1] is suspiciously short,
- * ~21us, matching neither the expected ~50us bit-separator nor the
- * expected ~80us ACK-high — possibly corrupting just the first
- * transmitted byte while leaving everything after it clean).
+ * DHT11 frame / bit numbering used here:
+ * edge[2k] (R) / edge[2k+1] (F) is bit k's data-high pulse, k=0..31 —
+ * confirmed structurally correct by inspecting real captures: every
+ * single (even,odd) gap is cleanly ~24us or ~70us (the '0'/'1' data
+ * pulse widths) and every (odd,even) gap is cleanly ~53us (the 50us
+ * separator), with no ambiguity anywhere in a real capture. So edge[0]
+ * really is bit0's data-high start, not the ACK (the ACK is missed
+ * entirely — see below).
  *
- * So instead of assuming any fixed frame structure, decode_edges() now
- * slides an 8-bit window across the *entire* captured buffer and
- * reports every possible byte value, flagging whichever ones land near
- * HUMIDITY_HINT/TEMPERATURE_HINT (independently measured reference
- * values, not from this sensor — supplied at the top of this file).
- * This is a debugging tool, not a real deployment strategy: it only
- * works because we have ground truth to compare against right now.
- * Once we know which raw start-index reliably corresponds to which
- * value, that should get hardcoded back into a real frame model.
+ * Per the standard DHT11 byte layout (humidity-int, humidity-dec,
+ * temp-int, temp-dec, checksum), bits 16-23 are the temperature integer
+ * and bits 24-31 are the temperature decimal (always 0 on real DHT11
+ * hardware, but read anyway per request). We only use temperature —
+ * humidity (bits 0-15) was checked against an independent thermometer/
+ * hygrometer reading and never matched at any alignment we tried
+ * within reach of the capture limit below, so it's dropped rather than
+ * reported as a guess.
  *
- * We also can't capture the full 40-bit frame at all: this Pi's
- * capture reliably and reproducibly stalls with a multi-hundred-ms gap
- * right around bit 31 (~3ms of elapsed real time after arming) — same
- * exact edge count, three runs in a row, regardless of re-arming the
- * event detection after every edge, which rules out a registration/
- * pulse-capacity issue. Root cause not found (would need slog2info or
- * kernel-level tracing to dig further).
+ * Known hard limit: this Pi's capture reliably and reproducibly stalls
+ * with a multi-hundred-ms gap right around bit 31 (~3ms of elapsed real
+ * time after arming) — same exact edge count, multiple runs in a row,
+ * regardless of re-arming the event detection after every edge (which
+ * rules out a registration/pulse-capacity issue). Root cause not found
+ * (would need slog2info or kernel-level tracing to dig further). Bit 31
+ * is exactly the last bit we need, so this is right at the edge of
+ * what's reachable — reads may fail more often than earlier, shorter
+ * captures did.
  *
  * Build (run ON the Pi, after building librpi_gpio.a per
  * common/rpi_gpio/Makefile in the QNX hardware-component-samples repo —
@@ -78,9 +71,9 @@
  * Run (needs root — same as the rest of the sensor/camera work):
  *   sudo ./dht11_reader [bcm_gpio_pin]      # defaults to GPIO 17
  *
- * Output: on a good read, exactly one line "humidity,temperature\n"
- * (two integers, e.g. "45,23") on stdout, exit code 0. No checksum
- * validation (see frame note above) — values are taken on trust.
+ * Output: on a good read, exactly one line "temperature\n" (a single
+ * integer, e.g. "23") on stdout, exit code 0. No checksum validation
+ * (see frame note above) — value is taken on trust.
  * On a failed read (timeout, wrong edge order) prints a
  * diagnostic to stderr, exit code 1, nothing on stdout — caller should
  * wait >=1s and retry, per the DHT11 datasheet's minimum sample interval.
@@ -105,14 +98,12 @@
 
 #define DEFAULT_DHT_PIN   17
 #define EVENT_ID_EDGE     1    /* single id for both rising+falling, registered together */
-#define EXPECTED_EDGES    60   /* as many raw edges as we can grab — this Pi's capture has reproducibly
-                                 * stalled past edge ~65 (see file header), so this stays under that ceiling */
+#define TEMP_INT_BIT      16   /* bit 16 = first bit of the temperature-integer byte */
+#define TEMP_DEC_BIT      24   /* bit 24 = first bit of the temperature-decimal byte */
+#define EXPECTED_EDGES    64   /* need through bit 31 (temp-decimal's last bit) = edges 0..63.
+                                 * This Pi's capture has reproducibly stalled right around this point
+                                 * (see file header) — bit 31 is at the edge of what's reachable. */
 #define READ_TIMEOUT_MS   200  /* safety net per-edge wait, in case the sensor stalls */
-/* Known-good reference values for THIS test, from an independent thermometer/hygrometer reading
- * (~12C, ~92% RH) — used only to find which sliding 8-bit window in the captured buffer is real
- * data, by checking which window's value lands close to one of these, not as a permanent feature. */
-#define HUMIDITY_HINT     92
-#define TEMPERATURE_HINT  12
 
 typedef struct {
     uint64_t ts_ns;
@@ -225,23 +216,20 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
     return (rc == 0 && got == n_edges) ? 0 : -1;
 }
 
-/* Decode one 8-bit byte from edges[start..start+15] (8 bit-pairs, R then
- * F each), using a caller-supplied threshold (computed globally across
- * the whole buffer, not just this window, for stability). Also fills
- * widths_out[0..7] with the raw pulse widths (ns) behind each bit, so a
- * match can be visually double-checked rather than trusted blindly.
- * Returns -1 if start..start+15 doesn't land on a clean R,F,R,F,... run. */
-static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *byte_out, uint64_t widths_out[8])
+/* Decode one 8-bit byte starting at bit number first_bit (NOT an edge
+ * index — edges[2*first_bit] is that bit's R, edges[2*first_bit+1] its
+ * F), using a threshold computed globally across the whole buffer for
+ * stability. Returns -1 if the run isn't a clean R,F,R,F,... pattern. */
+static int decode_byte_at_bit(edge_t *edges, int first_bit, uint64_t halfway, uint8_t *byte_out)
 {
     uint8_t byte = 0;
     for (int k = 0; k < 8; k++) {
-        int r_idx = start + 2 * k;
-        int f_idx = start + 2 * k + 1;
+        int r_idx = 2 * (first_bit + k);
+        int f_idx = r_idx + 1;
         if (!edges[r_idx].is_rising || edges[f_idx].is_rising) {
             return -1;
         }
         uint64_t width = edges[f_idx].ts_ns - edges[r_idx].ts_ns;
-        widths_out[k] = width;
         int bit = width > halfway ? 1 : 0;
         byte = (uint8_t)((byte << 1) | bit);
     }
@@ -249,27 +237,21 @@ static int decode_byte_at(edge_t *edges, int start, uint64_t halfway, uint8_t *b
     return 0;
 }
 
-static void print_widths_us(uint64_t widths[8])
+/* Fixed frame position, per the file header: bits 16-23 = temp integer,
+ * bits 24-31 = temp decimal (edges[0..1] is bit0's R/F, so this needs
+ * edges[32..63] to be present). Returns 0 and fills *temperature on
+ * success (as a float — temp_int + temp_dec/10.0), -1 if the edge
+ * buffer doesn't decode cleanly at these fixed positions. */
+static int decode_temperature(edge_t *edges, int n_edges, double *temperature)
 {
-    for (int k = 0; k < 8; k++) {
-        fprintf(stderr, "%s%.1f", k == 0 ? "" : ",", (double)widths[k] / 1000.0);
+    if (n_edges < 2 * (TEMP_DEC_BIT + 8)) {
+        fprintf(stderr, "[dht11] only %d edges captured, need %d to reach bit %d\n",
+                n_edges, 2 * (TEMP_DEC_BIT + 8), TEMP_DEC_BIT + 7);
+        return -1;
     }
-}
 
-/* No fixed byte structure assumed — slides an 8-bit window across every
- * valid starting position in the whole captured buffer. Rather than
- * checking if a window's *value* is merely close to HUMIDITY_HINT/
- * TEMPERATURE_HINT, this checks for an EXACT bit-pattern match against
- * those known values (92 = 01011100, 12 = 00001100) — a much stronger
- * signal, since matching the precise pattern of short/long pulses is
- * far less likely to happen by chance than landing within +/-2 of a
- * number. Prints the raw widths behind every exact match so it can be
- * eyeballed, not just trusted. Returns 0 if at least one exact match
- * was found for either value. */
-static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperature)
-{
-    int n_widths = (n_edges - 1) / 2;
     uint64_t shortest = UINT64_MAX, longest = 0;
+    int n_widths = n_edges / 2;
     for (int i = 0; i < n_widths; i++) {
         int r_idx = 2 * i, f_idx = 2 * i + 1;
         if (!edges[r_idx].is_rising || edges[f_idx].is_rising) continue;
@@ -279,34 +261,21 @@ static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperat
     }
     uint64_t halfway = (shortest + longest) / 2;
 
-    int humidity_match = -1, temperature_match = -1;
-    fprintf(stderr, "[dht11] scanning for EXACT matches to humidity=92 (0x5c) / temp=12 (0x0c), threshold %lluus:\n",
-            (unsigned long long)(halfway / 1000));
-    for (int start = 0; start + 15 < n_edges; start += 2) {
-        uint8_t byte;
-        uint64_t widths[8];
-        if (decode_byte_at(edges, start, halfway, &byte, widths) != 0) {
-            continue;
-        }
-        if (byte == HUMIDITY_HINT) {
-            fprintf(stderr, "  start %2d: byte=0x%02x == HUMIDITY_HINT exactly. Widths(us): ", start, byte);
-            print_widths_us(widths);
-            fprintf(stderr, "\n");
-            if (humidity_match == -1) humidity_match = byte;
-        } else if (byte == TEMPERATURE_HINT) {
-            fprintf(stderr, "  start %2d: byte=0x%02x == TEMPERATURE_HINT exactly. Widths(us): ", start, byte);
-            print_widths_us(widths);
-            fprintf(stderr, "\n");
-            if (temperature_match == -1) temperature_match = byte;
-        }
-    }
-
-    if (humidity_match == -1 && temperature_match == -1) {
-        fprintf(stderr, "[dht11] no window exactly matched either reference value\n");
+    uint8_t temp_int, temp_dec;
+    if (decode_byte_at_bit(edges, TEMP_INT_BIT, halfway, &temp_int) != 0) {
+        fprintf(stderr, "[dht11] bits %d-%d (temp integer) didn't decode cleanly\n",
+                TEMP_INT_BIT, TEMP_INT_BIT + 7);
         return -1;
     }
-    *humidity = (humidity_match != -1) ? humidity_match : 0;
-    *temperature = (temperature_match != -1) ? temperature_match : 0;
+    if (decode_byte_at_bit(edges, TEMP_DEC_BIT, halfway, &temp_dec) != 0) {
+        fprintf(stderr, "[dht11] bits %d-%d (temp decimal) didn't decode cleanly\n",
+                TEMP_DEC_BIT, TEMP_DEC_BIT + 7);
+        return -1;
+    }
+
+    fprintf(stderr, "[dht11] temp_int=%u temp_dec=%u (threshold %lluus)\n",
+            temp_int, temp_dec, (unsigned long long)(halfway / 1000));
+    *temperature = (double)temp_int + (double)temp_dec / 10.0;
     return 0;
 }
 
@@ -352,13 +321,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int humidity = 0, temperature = 0;
-    if (decode_edges(edges, EXPECTED_EDGES, &humidity, &temperature) != 0) {
+    double temperature = 0.0;
+    if (decode_temperature(edges, EXPECTED_EDGES, &temperature) != 0) {
         rpi_gpio_cleanup();
         return 1;
     }
 
-    printf("%d,%d\n", humidity, temperature);
+    printf("%.1f\n", temperature);
     rpi_gpio_cleanup();
     return 0;
 }

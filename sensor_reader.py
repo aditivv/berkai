@@ -26,7 +26,12 @@ DHT11_ENABLED = os.path.exists(DHT11_BINARY_PATH)
 
 
 def read_dht11_once():
-    """Run the compiled dht11_reader binary once. Returns (humidity, temp) or None on failure."""
+    """Run the compiled dht11_reader binary once. Returns temperature (float) or None on failure.
+
+    dht11_reader.c reports temperature only (bits 16-23/24-31 of the DHT11
+    frame) — humidity never matched a plausible value at any alignment we
+    could reach within this Pi's capture limit, so it's not reported.
+    """
     try:
         result = subprocess.run(
             [DHT11_BINARY_PATH, str(DHT11_GPIO_PIN)],
@@ -42,8 +47,7 @@ def read_dht11_once():
         return None
 
     try:
-        humidity_str, temp_str = result.stdout.strip().split(",")
-        return int(humidity_str), int(temp_str)
+        return float(result.stdout.strip())
     except ValueError:
         print(f"[dht11] unexpected output: {result.stdout!r}")
         return None
@@ -52,10 +56,9 @@ def read_dht11_once():
 def dht11_polling_loop():
     """Background thread: poll the physical DHT11 sensor, feed DHT11_SEGMENT_ID."""
     while True:
-        reading = read_dht11_once()
-        if reading is not None:
-            humidity, temp = reading
-            record_segment_reading(DHT11_SEGMENT_ID, temp, humidity)
+        temp = read_dht11_once()
+        if temp is not None:
+            record_segment_reading(DHT11_SEGMENT_ID, temp)
         time.sleep(DHT11_POLL_INTERVAL)
 
 # ── VISUAL DETECTION FLAGS ────────────────────────────────
