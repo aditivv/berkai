@@ -32,7 +32,7 @@ def _get_camera():
     # list all cameras available
     
     if _camera is None or not _camera.isOpened():
-        _camera = _VideoCapture(0)
+        _camera = _VideoCapture(1)
     return _camera
 
 def _generate_frames():
