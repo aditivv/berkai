@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pipe Digital Twin — Login</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      background: #0f1117;
+      color: #e0e0e0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .login-card {
+      background: #1a1d27;
+      border: 1px solid #2a2d3e;
+      border-radius: 12px;
+      padding: 40px 36px;
+      width: 360px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4);
+    }
+
+    .login-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+    .login-logo span { font-size: 28px; }
+    .login-logo h1 { font-size: 15px; font-weight: 600; color: #fff; line-height: 1.3; }
+    .login-logo small { display: block; color: #666; font-size: 11px; font-weight: 400; }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 6px;
+      margin-top: 16px;
+    }
+    input[type="email"], input[type="password"] {
+      width: 100%;
+      background: #131620;
+      border: 1px solid #2a2d3e;
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: #e0e0e0;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .2s;
+    }
+    input:focus { border-color: #2196f3; }
+
+    .error-msg {
+      margin-top: 14px;
+      padding: 8px 12px;
+      background: rgba(244,67,54,.15);
+      border: 1px solid rgba(244,67,54,.3);
+      border-radius: 6px;
+      color: #f44336;
+      font-size: 13px;
+      display: none;
+    }
+    .error-msg.visible { display: block; }
+
+    button[type="submit"] {
+      margin-top: 24px;
+      width: 100%;
+      padding: 11px;
+      background: #2196f3;
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s;
+    }
+    button[type="submit"]:hover { background: #1976d2; }
+    button[type="submit"]:active { background: #1565c0; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-logo">
+      <span>🔧</span>
+      <h1>Pipe Digital Twin<small>Pipeline Monitor</small></h1>
+    </div>
+
+    <form method="POST" action="/login">
+      <label for="email">Email</label>
+      <input id="email" type="email" name="email" placeholder="you@example.com" required autocomplete="email" />
+
+      <label for="password">Password</label>
+      <input id="password" type="password" name="password" placeholder="••••••••" required autocomplete="current-password" />
+
+      {% if error %}
+      <div class="error-msg visible">{{ error }}</div>
+      {% endif %}
+
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>
