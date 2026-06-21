@@ -11,13 +11,25 @@ from sensor_reader import get_segment_status, start_sensor_thread, force_anomaly
 app = Flask(__name__, static_folder='static')
 
 # ── Camera ────────────────────────────────────────────────────────────────────
+# Camera Module 3 is read through QNX's Sensor Framework via qnx_apis, a
+# wrapper that mirrors cv2's VideoCapture API. Falls back to cv2.VideoCapture
+# if qnx_apis isn't importable (e.g. running this off the Pi for other testing) —
+# that fallback will NOT see the Camera Module 3 under QNX, it's just so the
+# rest of the app doesn't crash on import.
+
+try:
+    import qnx_apis
+    _VideoCapture = qnx_apis.VideoCapture
+except ImportError:
+    print("qnx_apis not found — falling back to cv2.VideoCapture (won't see the Pi camera on QNX)")
+    _VideoCapture = cv2.VideoCapture
 
 _camera = None
 
 def _get_camera():
     global _camera
     if _camera is None or not _camera.isOpened():
-        _camera = cv2.VideoCapture(0)
+        _camera = _VideoCapture(0)
     return _camera
 
 def _generate_frames():
