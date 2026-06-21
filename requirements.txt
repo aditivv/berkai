@@ -4,3 +4,4 @@ python-dotenv==1.2.1
 #   sudo apt install python3-opencv
 # On desktop/laptop:
 opencv-python>=4.5     # for webcam capture via cv2.VideoCapture
+ultralytics>=8.0        # for ai_triage.py YOLO defect detection

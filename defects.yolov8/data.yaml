@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 3
+names: ['crack', 'hole', 'rupture']
+
+roboflow:
+  workspace: shrujans-workspace-js5aa
+  project: pipe-defects-ybzjr-ffcq7
+  version: dataset
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/shrujans-workspace-js5aa/pipe-defects-ybzjr-ffcq7/dataset/dataset

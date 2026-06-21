@@ -1,14 +1,27 @@
 from flask import Flask, jsonify, request, send_from_directory, Response
 from datetime import datetime
+import threading
+import time
 import cv2
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from config import SEGMENTS
-from sensor_reader import get_segment_status, start_sensor_thread, force_anomaly
+from sensor_reader import get_segment_status, start_sensor_thread, force_anomaly, set_visual_flag
+from ai_triage import detect_defects, annotate_frame, is_enabled, disabled_reason
+
+_TRIAGE_INTERVAL = 10   # seconds between model inference passes
+_TRIAGE_SEGMENT  = 0    # segment id monitored by the physical camera
 
 app = Flask(__name__, static_folder='static')
+
+# ── AI triage state ─────────────────────────────────────────────────────────
+# Latest detections are cached here so /api/detections can report them
+# without re-running inference; _generate_frames() updates this as it goes.
+
+_latest_detections = []
+_detections_lock = threading.Lock()
 
 # ── Camera ────────────────────────────────────────────────────────────────────
 # Camera Module 3 is read through QNX's Sensor Framework via qnx_apis, a
@@ -36,11 +49,18 @@ def _get_camera():
     return _camera
 
 def _generate_frames():
+    global _latest_detections
     cam = _get_camera()
     while True:
         ok, frame = cam.read()
         if not ok:
             break
+
+        detections = detect_defects(frame)
+        with _detections_lock:
+            _latest_detections = detections
+        frame = annotate_frame(frame, detections)
+
         _, buf = cv2.imencode('.jpg', frame)
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
@@ -48,6 +68,17 @@ def _generate_frames():
 @app.route('/video_feed')
 def video_feed():
     return Response(_generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/detections')
+def detections():
+    with _detections_lock:
+        current = list(_latest_detections)
+    return jsonify({
+        "enabled": is_enabled(),
+        "disabled_reason": disabled_reason(),
+        "detections": current,
+        "timestamp": datetime.now().isoformat()
+    })
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
@@ -77,6 +108,18 @@ def demo_anomaly():
     force_anomaly(segment_id)
     return jsonify({"ok": True, "segment_id": segment_id})
 
+def _run_triage_updates():
+    """Every _TRIAGE_INTERVAL seconds, apply latest YOLO detections to the segment state."""
+    while True:
+        time.sleep(_TRIAGE_INTERVAL)
+        with _detections_lock:
+            detections = list(_latest_detections)
+        labels = [d['label'] for d in detections]
+        set_visual_flag(_TRIAGE_SEGMENT, labels)
+        if labels:
+            print(f"[triage] segment {_TRIAGE_SEGMENT} flagged: {labels}")
+
 if __name__ == '__main__':
     start_sensor_thread()
+    threading.Thread(target=_run_triage_updates, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

@@ -8,6 +8,25 @@ segment_readings = {}
 reading_history = {}
 lock = threading.RLock()
 
+# ── VISUAL DETECTION FLAGS ────────────────────────────────
+# Set by the AI triage thread in app.py every 10 s.
+# Maps segment_id -> list of detected defect label strings.
+# Empty list means no active visual defect.
+
+_DEFECT_LABELS = {'crack', 'hole', 'rupture'}
+_visual_flags = {}   # segment_id -> [label, ...]
+
+
+def set_visual_flag(segment_id, detected_labels):
+    """
+    Update the visual anomaly flag for a segment.
+    detected_labels: iterable of label strings from the YOLO model.
+    Only labels in _DEFECT_LABELS are recorded; others are ignored.
+    """
+    defects = [l for l in detected_labels if l in _DEFECT_LABELS]
+    with lock:
+        _visual_flags[segment_id] = defects
+
 # ── SIMULATED MODE ──────────────────────────────────────
 
 def simulate_sensors():
@@ -64,12 +83,18 @@ def get_segment_status():
             else:
                 state = "normal"
 
+            # Visual detections override to anomaly regardless of temperature
+            visual_defects = _visual_flags.get(seg_id, [])
+            if visual_defects:
+                state = "anomaly"
+
             status[seg_id] = {
                 **seg,
                 "temp": round(temp, 1) if temp else None,
                 "state": state,
                 "trend": get_trend(seg_id),
                 "last_seen": reading["last_seen"] if reading else None,
+                "visual_defects": visual_defects,
             }
     return status
 
