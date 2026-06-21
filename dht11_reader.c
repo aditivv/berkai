@@ -96,7 +96,9 @@
 #define DEFAULT_DHT_PIN   17
 #define EVENT_ID_EDGE     1   /* single id for both rising+falling, registered together */
 #define NUM_BITS          24   /* humidity (8) + humidity-decimal (8) + temperature-integer (8); see file header */
-#define OFFSET_SLACK      8    /* extra edges captured so several start-offsets can be tried against one capture */
+#define OFFSET_SLACK      16   /* extra edges captured so several start-offsets can be tried against one capture.
+                                 * 2*NUM_BITS+OFFSET_SLACK must stay under ~64 — this Pi's capture has reproducibly
+                                 * stalled past edge ~65 (see file header), so this is close to the ceiling. */
 #define EXPECTED_EDGES    (2 * NUM_BITS + OFFSET_SLACK)
 #define READ_TIMEOUT_MS   200  /* safety net per-edge wait, in case the sensor stalls */
 
@@ -256,29 +258,45 @@ static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperat
 {
     (void)n_edges;
     int found_good = -1;
+    int found_plausible = -1;
 
-    fprintf(stderr, "[dht11] trying multiple bit-alignment offsets (byte[1]==0x00 is the correct one):\n");
+    fprintf(stderr, "[dht11] trying multiple bit-alignment offsets:\n");
     for (int offset = 0; offset <= OFFSET_SLACK; offset++) {
         uint8_t bytes[NUM_BITS / 8];
         if (decode_at(edges, offset, bytes) != 0) {
-            fprintf(stderr, "  offset %d: bad edge order\n", offset);
+            fprintf(stderr, "  offset %2d: bad edge order\n", offset);
             continue;
         }
-        fprintf(stderr, "  offset %d: humidity=%u humidity_dec=0x%02x temp=%u%s\n",
+        /* DHT11 spec: 20-90% RH, 0-50C — widened a bit (5-95, 0-55) since
+         * clone sensors can run slightly out of spec. humidity_dec==0 is
+         * the spec-correct check but some clones populate that byte with
+         * ignorable junk, so plausibility of the *measurements* (not the
+         * unused decimal byte) is the more trustworthy signal here. */
+        int plausible = bytes[0] >= 5 && bytes[0] <= 95 && bytes[2] <= 55;
+        fprintf(stderr, "  offset %2d: humidity=%3u humidity_dec=0x%02x temp=%3u%s%s\n",
                 offset, bytes[0], bytes[1], bytes[2],
-                bytes[1] == 0 ? "  <-- humidity_dec is 0x00" : "");
+                bytes[1] == 0 ? "  [dec=0x00]" : "",
+                plausible ? "  [PLAUSIBLE]" : "");
         if (bytes[1] == 0 && found_good == -1) {
             found_good = offset;
-            *humidity = bytes[0];
-            *temperature = bytes[2];
+        }
+        if (plausible && found_plausible == -1) {
+            found_plausible = offset;
         }
     }
 
-    if (found_good == -1) {
-        fprintf(stderr, "[dht11] no offset gave humidity_dec==0x00 — none of these are trustworthy\n");
+    int chosen = (found_plausible != -1) ? found_plausible : found_good;
+    if (chosen == -1) {
+        fprintf(stderr, "[dht11] no offset looked trustworthy by either check\n");
         return -1;
     }
-    fprintf(stderr, "[dht11] using offset %d\n", found_good);
+
+    uint8_t bytes[NUM_BITS / 8];
+    decode_at(edges, chosen, bytes);
+    *humidity = bytes[0];
+    *temperature = bytes[2];
+    fprintf(stderr, "[dht11] using offset %d (%s)\n", chosen,
+            found_plausible != -1 ? "plausibility check" : "humidity_dec==0x00 fallback");
     return 0;
 }
 
