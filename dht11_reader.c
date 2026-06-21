@@ -96,7 +96,8 @@
 #define DEFAULT_DHT_PIN   17
 #define EVENT_ID_EDGE     1   /* single id for both rising+falling, registered together */
 #define NUM_BITS          24   /* humidity (8) + humidity-decimal (8) + temperature-integer (8); see file header */
-#define EXPECTED_EDGES    (2 + 2 * NUM_BITS)   /* ACK high-start + (lead-low,data-high) pair per bit */
+#define OFFSET_SLACK      8    /* extra edges captured so several start-offsets can be tried against one capture */
+#define EXPECTED_EDGES    (2 * NUM_BITS + OFFSET_SLACK)
 #define READ_TIMEOUT_MS   200  /* safety net per-edge wait, in case the sensor stalls */
 
 typedef struct {
@@ -210,20 +211,22 @@ static int capture_edges(int dht_pin, int chid, int coid, edge_t *edges, int n_e
     return (rc == 0 && got == n_edges) ? 0 : -1;
 }
 
-/* Decode NUM_BITS captured edges into (humidity, temperature). No
- * checksum (it lives past bit 31, which we don't capture — see file
- * header). Returns 0 on success, -1 on bad framing. */
-static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperature)
+/* Decode NUM_BITS bits starting at edges[start_offset] (bit k spans
+ * edges[start_offset+2k] (R) to edges[start_offset+2k+1] (F)). No
+ * checksum available (see file header) — instead, byte[1] (humidity-
+ * decimal) is a strong correctness check on its own: DHT11 has no
+ * fractional humidity precision, so a *correct* start_offset should
+ * always decode it as exactly 0x00. Returns 0 if edge order is sane
+ * (still doesn't guarantee start_offset is the right one — that's
+ * what byte[1]==0 across several tried offsets is for). */
+static int decode_at(edge_t *edges, int start_offset, uint8_t bytes_out[NUM_BITS / 8])
 {
-    if (n_edges != EXPECTED_EDGES) return -1;
-
     uint64_t widths[NUM_BITS];
     for (int k = 0; k < NUM_BITS; k++) {
-        int r_idx = 2 + 2 * k;
-        int f_idx = 3 + 2 * k;
+        int r_idx = start_offset + 2 * k;
+        int f_idx = start_offset + 2 * k + 1;
         if (!edges[r_idx].is_rising || edges[f_idx].is_rising) {
-            fprintf(stderr, "[dht11] unexpected edge order at bit %d — noisy read\n", k);
-            return -1;
+            return -1;  /* this offset doesn't land on a clean R,F pairing */
         }
         widths[k] = edges[f_idx].ts_ns - edges[r_idx].ts_ns;
     }
@@ -235,14 +238,47 @@ static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperat
     }
     uint64_t halfway = (shortest + longest) / 2;
 
-    uint8_t bytes[NUM_BITS / 8] = {0};
+    memset(bytes_out, 0, NUM_BITS / 8);
     for (int k = 0; k < NUM_BITS; k++) {
         int bit = widths[k] > halfway ? 1 : 0;
-        bytes[k / 8] = (uint8_t)((bytes[k / 8] << 1) | bit);
+        bytes_out[k / 8] = (uint8_t)((bytes_out[k / 8] << 1) | bit);
+    }
+    return 0;
+}
+
+/* Try a handful of start offsets against the same capture and print all
+ * of them — DHT11's humidity-decimal byte (bytes[1]) must be 0x00 by
+ * spec, so whichever offset gives that is almost certainly correct.
+ * *humidity/*temperature are set from whichever offset matches that
+ * check first; if none match, falls back to OFFSET_GUESS so there's
+ * still output to look at. Returns 0 if any offset decoded cleanly. */
+static int decode_edges(edge_t *edges, int n_edges, int *humidity, int *temperature)
+{
+    (void)n_edges;
+    int found_good = -1;
+
+    fprintf(stderr, "[dht11] trying multiple bit-alignment offsets (byte[1]==0x00 is the correct one):\n");
+    for (int offset = 0; offset <= OFFSET_SLACK; offset++) {
+        uint8_t bytes[NUM_BITS / 8];
+        if (decode_at(edges, offset, bytes) != 0) {
+            fprintf(stderr, "  offset %d: bad edge order\n", offset);
+            continue;
+        }
+        fprintf(stderr, "  offset %d: humidity=%u humidity_dec=0x%02x temp=%u%s\n",
+                offset, bytes[0], bytes[1], bytes[2],
+                bytes[1] == 0 ? "  <-- humidity_dec is 0x00" : "");
+        if (bytes[1] == 0 && found_good == -1) {
+            found_good = offset;
+            *humidity = bytes[0];
+            *temperature = bytes[2];
+        }
     }
 
-    *humidity = bytes[0];     /* byte 0: humidity integer */
-    *temperature = bytes[2];  /* byte 2: temperature integer (byte 1 is humidity decimal, unused) */
+    if (found_good == -1) {
+        fprintf(stderr, "[dht11] no offset gave humidity_dec==0x00 — none of these are trustworthy\n");
+        return -1;
+    }
+    fprintf(stderr, "[dht11] using offset %d\n", found_good);
     return 0;
 }
 
