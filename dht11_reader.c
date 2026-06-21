@@ -10,10 +10,20 @@
  *     a loop.
  *   - rpi_gpio_add_event_detect() registers a QNX pulse (SIGEV_PULSE)
  *     that the resource manager delivers asynchronously on a GPIO edge.
- *     We register RISING and FALLING separately, with different
- *     event_ids, so the pulse itself tells us the edge direction — no
- *     input() calls are needed during the timing-critical window, just
- *     a clock_gettime() the instant each pulse arrives.
+ *     We register RISING|FALLING together in a single call. (An earlier
+ *     version registered them as two separate calls with different
+ *     event_ids, hoping the pulse itself would tell us the direction —
+ *     on real hardware this silently failed: the second add_event_detect
+ *     call appears to replace the first rather than add to it, since
+ *     every captured edge came back tagged as whichever edge type was
+ *     registered last. Confirmed via a verbose per-edge timing dump that
+ *     showed 30+ consecutive "FALLING" edges at a real, alternating
+ *     DHT11 bit cadence (~78us/~124us) — i.e. real rising edges were
+ *     happening on the wire but never reported.) Now we timestamp
+ *     immediately on pulse receipt (still no polling in the timing-
+ *     critical wait), then make one rpi_gpio_input() call afterward just
+ *     to label which direction it was — that extra call doesn't affect
+ *     the recorded timestamp, only how we annotate it.
  *
  * DHT11 frame, after we release the start signal and arm detection
  * (line idles HIGH via pull-up until the sensor responds):
@@ -69,8 +79,7 @@
 #include "rpi_gpio.h"
 
 #define DEFAULT_DHT_PIN   17
-#define EVENT_ID_RISING   1
-#define EVENT_ID_FALLING  2
+#define EVENT_ID_EDGE     1   /* single id for both rising+falling, registered together */
 #define EXPECTED_EDGES    83   /* 2 (ACK low+high) + 40 bits * 2 (lead-low + data-high) + 1 trailing falling */
 #define READ_TIMEOUT_MS   200  /* safety net per-edge wait, in case the sensor stalls */
 
@@ -139,12 +148,8 @@ static int capture_edges(int dht_pin, edge_t *edges, int n_edges)
     }
 
     int rc = 0;
-    if (rpi_gpio_add_event_detect(dht_pin, coid, GPIO_RISING, EVENT_ID_RISING) != GPIO_SUCCESS) {
-        fprintf(stderr, "[dht11] add_event_detect(RISING) failed\n");
-        rc = -1;
-    }
-    if (rc == 0 && rpi_gpio_add_event_detect(dht_pin, coid, GPIO_FALLING, EVENT_ID_FALLING) != GPIO_SUCCESS) {
-        fprintf(stderr, "[dht11] add_event_detect(FALLING) failed\n");
+    if (rpi_gpio_add_event_detect(dht_pin, coid, GPIO_RISING | GPIO_FALLING, EVENT_ID_EDGE) != GPIO_SUCCESS) {
+        fprintf(stderr, "[dht11] add_event_detect(RISING|FALLING) failed\n");
         rc = -1;
     }
 
@@ -167,16 +172,17 @@ static int capture_edges(int dht_pin, edge_t *edges, int n_edges)
             break;
         }
 
-        if (pulse.value.sival_int == EVENT_ID_RISING) {
-            edges[got].ts_ns = now_ns();
-            edges[got].is_rising = 1;
-            got++;
-        } else if (pulse.value.sival_int == EVENT_ID_FALLING) {
-            edges[got].ts_ns = now_ns();
-            edges[got].is_rising = 0;
-            got++;
+        if (pulse.value.sival_int != EVENT_ID_EDGE) {
+            continue; /* unrelated pulse, ignore without consuming a slot */
         }
-        /* else: unrelated pulse, ignore without consuming a slot */
+
+        uint64_t ts = now_ns();  /* timestamp first — input() call below is not timing-critical */
+        unsigned level = GPIO_LOW;
+        rpi_gpio_input(dht_pin, &level);  /* current level right after the edge tells us its direction */
+
+        edges[got].ts_ns = ts;
+        edges[got].is_rising = (level == GPIO_HIGH) ? 1 : 0;
+        got++;
     }
 
     /* Always dump what we actually saw to stderr — doesn't touch stdout,
