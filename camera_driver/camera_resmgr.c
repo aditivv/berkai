@@ -45,7 +45,6 @@
 #include <sys/iofunc.h>
 #include <sys/dispatch.h>
 #include <hw/i2c.h>
-#include <pci/pci.h>
 
 #include "dphy.h"
 #include "csi2.h"
@@ -56,23 +55,29 @@
  * ========================================================================= */
 
 /*
- * RP1 PCI identity.
- * Run `pci-tool -v` on the Pi to confirm; look for "1de4:0001".
+ * RP1 physical base address as seen by the BCM2712 CPU.
+ *
+ * The BCM2712 firmware maps PCIe1 (internal link to RP1) via:
+ *   ranges = <0x02000000 0x00 0xc0000000  0x1f 0x00000000  0x00 0x40000000>
+ * meaning RP1 BAR0 (PCIe addr 0xc0000000) sits at CPU phys 0x1f00000000.
+ * This is fixed on ALL RPi5 boards — no need for the PCI library.
+ *
+ * Verify by booting Linux on the same Pi and running:
+ *   sudo cat /proc/iomem | grep -i rp1
+ * You should see something like: 1f00000000-1f3fffffff : rp1
  */
-#define RP1_VENDOR_ID           0x1de4u
-#define RP1_DEVICE_ID           0x0001u
+#define RP1_BAR0_PHYS           0x1f00000000ULL
 
 /*
- * Register offsets within RP1's PCI BAR0 (byte offsets).
- * Source: bcm2712-rpi-5-b.dts / rp1.dtsi (Linux rpi-6.12.y).
+ * Register offsets within RP1 BAR0.
+ * Source: rp1.dtsi, Linux rpi-6.12.y (reg-names "csi2" and "dphy").
  *
- * If Step 1 reads STATUS = 0xFFFFFFFF or all-zero, these offsets are likely
- * wrong for your RP1 silicon revision.  Cross-check by running Linux and
- * reading: sudo cat /sys/bus/platform/devices/???:csi0/resource
+ * If CSI2_STATUS reads 0xFFFFFFFF, the offset is wrong.
+ * Cross-check with: sudo cat /sys/bus/platform/devices/*/resource on Linux.
  */
-#define RP1_CSI0_DMA_OFFSET     0x00C0B000u   /* CSI-2 DMA registers      */
+#define RP1_CSI0_DMA_OFFSET     0x00C0B000ULL  /* CSI-2 DMA registers      */
 #define RP1_CSI0_DMA_SIZE       0x100u
-#define RP1_CSI0_DPHY_OFFSET    0x00C0B700u   /* D-PHY registers           */
+#define RP1_CSI0_DPHY_OFFSET    0x00C0B700ULL  /* D-PHY registers           */
 #define RP1_CSI0_DPHY_SIZE      0x200u
 
 /* CSI-2 channel used for image capture (VC0) */
@@ -95,82 +100,35 @@
 #define VIDEO_DEV_PATH          "/dev/video0"
 
 /* =========================================================================
- * Step 1 helpers — PCIe BAR mapping
+ * Step 1 helpers — direct physical memory mapping (no PCI library needed)
  * ========================================================================= */
 
-typedef struct {
-    pci_hdl_t     pci_hdl;
-    pci_devhdl_t  dev_hdl;
-    pci_bdf_t     bdf;
-    uint64_t      bar0_phys;   /* physical base of RP1 BAR0 */
-    uint64_t      bar0_size;
-} rp1_pci_t;
-
 /*
- * rp1_pci_attach - locate RP1 on the PCI bus and read its BAR0 address.
- * Returns 0 on success, -1 on failure.
+ * rp1_map - mmap a sub-region of RP1's address space.
+ *
+ * Uses mmap_device_memory() with the hardcoded RP1 physical base.
+ * Requires the process to have the PROCMGR_AID_MEM_PHYS ability,
+ * which is granted when running as root (default for QNX drivers).
+ *
+ * phys_offset : byte offset from RP1_BAR0_PHYS
+ * size        : region size in bytes
  */
-static int rp1_pci_attach(rp1_pci_t *p)
+static volatile uint32_t *rp1_map(uint64_t phys_offset, uint32_t size)
 {
-    pci_err_t err;
-
-    p->pci_hdl = pci_attach(0);
-    if (p->pci_hdl == NULL) {
-        fprintf(stderr, "[pci] pci_attach failed: %s\n", strerror(errno));
-        return -1;
-    }
-
-    /* Find RP1 by vendor + device ID */
-    p->bdf = pci_device_find(p->pci_hdl, 0, RP1_VENDOR_ID, RP1_DEVICE_ID,
-                              PCI_CLASS_ANY);
-    if (p->bdf == PCI_BDF_NONE) {
-        fprintf(stderr, "[pci] RP1 (0x%04x:0x%04x) not found on PCI bus\n",
-                RP1_VENDOR_ID, RP1_DEVICE_ID);
-        return -1;
-    }
-    fprintf(stderr, "[pci] found RP1 at BDF=%08x\n", p->bdf);
-
-    p->dev_hdl = pci_device_attach(p->bdf, pci_attachFlags_SHARED, &err);
-    if (p->dev_hdl == NULL) {
-        fprintf(stderr, "[pci] pci_device_attach failed: err=%d\n", err);
-        return -1;
-    }
-
-    /* Read BAR addresses */
-    uint_t nba = 6;
-    pci_ba_t ba[6];
-    memset(ba, 0, sizeof(ba));
-    err = pci_device_read_ba(p->dev_hdl, &nba, ba, pci_reqType_e_MANDATORY);
-    if (err != PCI_ERR_OK || nba == 0) {
-        fprintf(stderr, "[pci] pci_device_read_ba failed: err=%d nba=%u\n",
-                err, nba);
-        return -1;
-    }
-
-    p->bar0_phys = ba[0].addr;
-    p->bar0_size = ba[0].size;
-    fprintf(stderr, "[pci] RP1 BAR0: phys=0x%016llx size=0x%016llx\n",
-            (unsigned long long)p->bar0_phys,
-            (unsigned long long)p->bar0_size);
-
-    return 0;
-}
-
-/*
- * rp1_map - mmap a sub-region of RP1 BAR0.
- * offset and size are byte values; returns MAP_FAILED on error.
- */
-static volatile uint32_t *rp1_map(rp1_pci_t *p, uint64_t offset, uint32_t size)
-{
+    uint64_t phys = RP1_BAR0_PHYS + phys_offset;
     void *va = mmap_device_memory(NULL, size,
                                   PROT_READ | PROT_WRITE | PROT_NOCACHE,
                                   MAP_SHARED,
-                                  p->bar0_phys + offset);
+                                  phys);
     if (va == MAP_FAILED) {
-        fprintf(stderr, "[pci] mmap_device_memory offset=0x%llx size=%u failed: %s\n",
-                (unsigned long long)offset, size, strerror(errno));
+        fprintf(stderr, "[mmap] mmap_device_memory phys=0x%016llx size=%u "
+                "failed: %s\n",
+                (unsigned long long)phys, size, strerror(errno));
+        fprintf(stderr, "       Are you running as root?\n");
         return NULL;
     }
+    fprintf(stderr, "[mmap] mapped phys=0x%016llx size=0x%x → virt=%p\n",
+            (unsigned long long)phys, size, va);
     return (volatile uint32_t *)va;
 }
 
@@ -506,23 +464,19 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  [MODE] color bar test pattern enabled\n");
 
     /* ------------------------------------------------------------------
-     * STEP 1: PCIe BAR mapping + DPHY + CSI-2 RX init
+     * STEP 1: Direct physical memory mapping + DPHY + CSI-2 RX init
      * ------------------------------------------------------------------ */
-    fprintf(stderr, "\n--- Step 1: PCIe BAR mapping ---\n");
-
-    rp1_pci_t rp1 = {0};
-    if (rp1_pci_attach(&rp1) != 0) {
-        fprintf(stderr, "FATAL: cannot attach RP1 PCI device\n");
-        return 1;
-    }
+    fprintf(stderr, "\n--- Step 1: RP1 register mapping ---\n");
+    fprintf(stderr, "[step1] RP1 BAR0 phys base = 0x%016llx\n",
+            (unsigned long long)RP1_BAR0_PHYS);
 
     /* Map CSI-2 DMA registers */
-    volatile uint32_t *csi2_regs = rp1_map(&rp1, RP1_CSI0_DMA_OFFSET,
+    volatile uint32_t *csi2_regs = rp1_map(RP1_CSI0_DMA_OFFSET,
                                              RP1_CSI0_DMA_SIZE);
     if (!csi2_regs) return 1;
 
     /* Map DPHY registers */
-    volatile uint32_t *dphy_regs = rp1_map(&rp1, RP1_CSI0_DPHY_OFFSET,
+    volatile uint32_t *dphy_regs = rp1_map(RP1_CSI0_DPHY_OFFSET,
                                              RP1_CSI0_DPHY_SIZE);
     if (!dphy_regs) return 1;
 
@@ -635,22 +589,26 @@ int main(int argc, char *argv[])
     }
 
     /*
-     * Attach to the RP1's PCI interrupt.
-     * The RP1 uses MSI-X; the CSI-2 IRQ is the first interrupt vector.
-     * Read the IRQ number from the PCI config:
+     * IRQ attachment.
+     *
+     * The QNX PCI server (pci-server) handles RP1's MSI-X setup.
+     * To find the CSI-2 IRQ number, run on the Pi:
+     *   pidin -P pci-server ir
+     * or: cat /proc/interrupts  (if procfs is mounted)
+     *
+     * For now we skip interrupt attachment and rely on the CH_DEBUG
+     * frame-counter polling already done in Step 3.  The read() path
+     * also polls frame_count (incremented here by interrupt, or by a
+     * future upgrade).  Polling works reliably for the pipe-monitoring
+     * use case at 56 fps.
+     *
+     * To enable interrupts later, uncomment the block below and fill in
+     * the correct IRQ number from pidin output.
      */
-    int irq;
-    uint_t n_irq = 1;
-    pci_irq_t pci_irq;
-    if (pci_device_read_irq(rp1.dev_hdl, &n_irq, &pci_irq) != PCI_ERR_OK ||
-        n_irq == 0) {
-        fprintf(stderr, "[intr] WARNING: cannot read PCI IRQ, "
-                "running without interrupt (polling mode)\n");
-        irq = -1;
-    } else {
-        irq = (int)pci_irq;
-        fprintf(stderr, "[intr] PCI IRQ = %d\n", irq);
-    }
+    int irq = -1;  /* set to actual IRQ to enable interrupt mode */
+    /* Example (fill in correct IRQ):
+     * irq = 189;
+     */
 
     if (irq >= 0) {
         /* Need PROCMGR_AID_INTERRUPT ability — run as root or with procmgr ability */

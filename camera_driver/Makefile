@@ -16,9 +16,10 @@ CFLAGS  = -Wall -Wextra -O2 -g \
            -I.
 
 # Libraries:
-#   -lpci    : QNX PCI server API (pci_attach, pci_device_find, etc.)
 #   -lpthread: POSIX threads (dispatch loop uses it internally)
-LDFLAGS = -lpci -lpthread
+#   Note: no -lpci needed — RP1 registers accessed via mmap_device_memory()
+#   directly at the hardcoded physical base 0x1f00000000.
+LDFLAGS = -lpthread
 
 SRCS    = camera_resmgr.c csi2.c dphy.c
 OBJS    = $(SRCS:.c=.o)
