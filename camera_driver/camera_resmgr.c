@@ -73,7 +73,7 @@
  * Source: rp1.dtsi, Linux rpi-6.12.y (reg-names "csi2" and "dphy").
  *
  * If CSI2_STATUS reads 0xFFFFFFFF, the offset is wrong.
- * Cross-check with: sudo cat /sys/bus/platform/devices/*/resource on Linux.
+ * Cross-check with: sudo cat /sys/bus/platform/devices/ADDR:csi0/resource on Linux.
  */
 #define RP1_CSI0_DMA_OFFSET     0x00C0B000ULL  /* CSI-2 DMA registers      */
 #define RP1_CSI0_DMA_SIZE       0x100u
@@ -277,8 +277,8 @@ static int imx708_init(int test_mode)
  * Step 3 — DMA buffer allocation + capture
  * ========================================================================= */
 
-static void   *dma_virt = NULL;   /* virtual address of DMA buffer  */
-static uint64_t dma_phys = 0;     /* physical address                */
+static void    *dma_virt = NULL;   /* virtual address of DMA buffer  */
+static off64_t  dma_phys = 0;     /* physical address (off64_t for mem_offset64) */
 
 /*
  * dma_alloc_contig - allocate a physically contiguous buffer.
@@ -309,7 +309,6 @@ static int dma_alloc_contig(size_t size)
     }
 
     /* Get physical address */
-    off64_t off = 0;
     if (mem_offset64(dma_virt, NOFD, 1, &dma_phys, NULL) != 0) {
         fprintf(stderr, "[dma] mem_offset64 failed: %s\n", strerror(errno));
         munmap(dma_virt, size);
@@ -319,7 +318,6 @@ static int dma_alloc_contig(size_t size)
 
     fprintf(stderr, "[dma] allocated %zu bytes: virt=%p phys=0x%016llx\n",
             size, dma_virt, (unsigned long long)dma_phys);
-    (void)off;
     return 0;
 }
 
@@ -390,15 +388,6 @@ typedef struct {
     size_t       offset;       /* bytes consumed so far in current frame */
 } video_ocb_t;
 
-static iofunc_funcs_t ocb_funcs = {
-    _IOFUNC_NFUNCS,
-    NULL,   /* nfuncs            */
-};
-
-static iofunc_mount_t mount_attr = {
-    0, 0, 0, 0, &ocb_funcs
-};
-
 static int io_open(resmgr_context_t *ctp, io_open_t *msg,
                    iofunc_attr_t *attr, void *extra)
 {
@@ -407,7 +396,8 @@ static int io_open(resmgr_context_t *ctp, io_open_t *msg,
     if (!ocb)
         return ENOMEM;
 
-    iofunc_ocb_attach(ctp, msg, &ocb->ocb, attr, &mount_attr);
+    /* iofunc_ocb_attach: last arg is io_funcs (not mount), NULL = use defaults */
+    iofunc_ocb_attach(ctp, msg, &ocb->ocb, attr, NULL);
     ocb->last_frame = frame_count;
     ocb->offset     = 0;
     return EOK;
@@ -420,9 +410,8 @@ static int io_read(resmgr_context_t *ctp, io_read_t *msg, iofunc_ocb_t *ocb_base
     /* Wait for a new frame if we've consumed the current one */
     if (ocb->offset == 0) {
         uint32_t target = ocb->last_frame + 1;
-        /* Spin-wait for the interrupt to increment frame_count.
-         * This is a simple approach; a production driver would use
-         * a condvar or MsgReceivePulse on intr_chid instead. */
+        /* Spin-wait for the frame counter to advance.
+         * A production driver would use MsgReceivePulse on intr_chid. */
         while (frame_count < target)
             usleep(1000);   /* 1 ms */
         ocb->last_frame = frame_count;
@@ -434,15 +423,16 @@ static int io_read(resmgr_context_t *ctp, io_read_t *msg, iofunc_ocb_t *ocb_base
     if ((size_t)nbytes > remaining)
         nbytes = (int)remaining;
 
-    /* Copy frame data to reply buffer */
-    SETIOV(ctp->iov, (uint8_t *)dma_virt + ocb->offset, nbytes);
+    /* Reply directly with the frame data */
     _IO_SET_READ_NBYTES(ctp, nbytes);
+    SETIOV(ctp->iov, (uint8_t *)dma_virt + ocb->offset, nbytes);
 
     ocb->offset += nbytes;
     if (ocb->offset >= FRAME_BYTES)
-        ocb->offset = 0;  /* frame fully consumed, next read waits for next frame */
+        ocb->offset = 0;  /* fully consumed; next read waits for next frame */
 
-    return _RESMGR_IOVEC(ctp, ctp->iov, 1);
+    /* _RESMGR_NPARTS(n): tell dispatcher we filled n iov entries */
+    return _RESMGR_NPARTS(1);
 }
 
 /* =========================================================================
@@ -487,8 +477,8 @@ int main(int argc, char *argv[])
 
     if (dphy_wait_stop(&dphy, DPHY_TIMEOUT_MS) != 0) {
         fprintf(stderr, "FATAL: D-PHY stop-state timeout — "
-                "check DPHY register offset (RP1_CSI0_DPHY_OFFSET=0x%08X)\n",
-                RP1_CSI0_DPHY_OFFSET);
+                "check DPHY register offset (RP1_CSI0_DPHY_OFFSET=0x%08llX)\n",
+                (unsigned long long)RP1_CSI0_DPHY_OFFSET);
         return 1;
     }
 
@@ -538,7 +528,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    csi2_start_channel(&csi2, CAPTURE_CHANNEL, dma_phys,
+    csi2_start_channel(&csi2, CAPTURE_CHANNEL, (uint64_t)dma_phys,
                        IMX708_2X2_LINE_BYTES, FRAME_HEIGHT,
                        CAPTURE_VC, CAPTURE_DT);
 
