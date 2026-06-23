@@ -17,9 +17,15 @@
  * Register offsets (byte offsets from DPHY base)
  * ----------------------------------------------------------------------- */
 
-/* Number of active data lanes (write N_LANES-1) */
-#define DPHY_CTRL0              0x00
-#define   DPHY_N_LANES(n)       ((n) & 0x3)        /* bits [1:0] */
+/*
+ * DPHY_CTRL0: lane-enable register.
+ *   Bit 0     = clock lane enable
+ *   Bits [4:1] = data lane enables (one bit per lane)
+ * NOT an N_LANES register — all active lanes must be explicitly enabled.
+ */
+#define DPHY_CTRL0                      0x00
+#define   DPHY_CTRL0_CLOCK_LANE_EN      (1u << 0)
+#define   DPHY_CTRL0_DATA_LANE_EN(n)    (1u << (1 + (n)))   /* n = 0..3 */
 
 /* Enable / soft-reset */
 #define DPHY_CTRL1              0x04

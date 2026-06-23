@@ -74,8 +74,15 @@ void dphy_start(dphy_t *d)
     /* 1. Assert all resets */
     reg_wr(d->base, DPHY_CTRL1, 0);   /* SHUTDOWNZ=0, RSTZ=0  */
 
-    /* 2. Set number of active data lanes (write lanes-1) */
-    reg_wr(d->base, DPHY_CTRL0, DPHY_N_LANES(d->nlanes - 1));
+    /* 2. Enable clock lane + all active data lanes.
+     *    DPHY_CTRL0 is a lane-enable bitmap, NOT an N_LANES register.
+     *    Bit 0 = clock lane, bits [1+n] = data lane n. */
+    {
+        uint32_t ctrl0 = DPHY_CTRL0_CLOCK_LANE_EN;
+        for (int i = 0; i < d->nlanes; i++)
+            ctrl0 |= DPHY_CTRL0_DATA_LANE_EN(i);
+        reg_wr(d->base, DPHY_CTRL0, ctrl0);   /* e.g. 0x7 for 2 lanes */
+    }
 
     /* 3. Reset the test interface (TESTCLR pulse) */
     reg_wr(d->base, DPHY_TST_CTRL0, DPHY_TESTCLR);
@@ -96,7 +103,8 @@ void dphy_start(dphy_t *d)
     usleep(15);
     reg_wr(d->base, DPHY_CTRL1, DPHY_SHUTDOWNZ | DPHY_RSTZ); /* reset released */
 
-    fprintf(stderr, "[dphy] reset released, waiting for stop-state...\n");
+    fprintf(stderr, "[dphy] reset released (CTRL0=0x%02x, CTRL1=0x%02x)\n",
+            reg_rd(d->base, DPHY_CTRL0), reg_rd(d->base, DPHY_CTRL1));
 }
 
 int dphy_wait_stop(dphy_t *d, int timeout_ms)

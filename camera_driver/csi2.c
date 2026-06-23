@@ -51,12 +51,6 @@ void csi2_open_rx(csi2_t *c)
     reg_wr(c->base, CSI2_IRQ_MASK, 0);
 
     /*
-     * Start the DPHY.  Must happen after sensor is streaming so the DPHY
-     * can lock to the LP-11 idle state the sensor drives between bursts.
-     */
-    dphy_start(c->dphy);
-
-    /*
      * EOP_IS_EOL: treat each packet end as a line end.
      * Required for correct DMA line-packing of RAW Bayer data.
      */
