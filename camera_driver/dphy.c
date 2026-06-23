@@ -74,21 +74,27 @@ void dphy_start(dphy_t *d)
     /* 1. Assert all resets */
     reg_wr(d->base, DPHY_CTRL1, 0);   /* SHUTDOWNZ=0, RSTZ=0  */
 
-    /* 2. Enable clock lane + all active data lanes.
-     *    DPHY_CTRL0 is a lane-enable bitmap, NOT an N_LANES register.
-     *    Bit 0 = clock lane, bits [1+n] = data lane n. */
-    {
-        uint32_t ctrl0 = DPHY_CTRL0_CLOCK_LANE_EN;
-        for (int i = 0; i < d->nlanes; i++)
-            ctrl0 |= DPHY_CTRL0_DATA_LANE_EN(i);
-        reg_wr(d->base, DPHY_CTRL0, ctrl0);   /* e.g. 0x7 for 2 lanes */
-    }
-
-    /* 3. Reset the test interface (TESTCLR pulse) */
+    /* 2. Reset the test interface (TESTCLR pulse).
+     *    Done BEFORE writing CTRL0: TESTCLR may reset CTRL0 on some DW DPHY
+     *    versions, so we clear it first and write lane enables afterwards. */
     reg_wr(d->base, DPHY_TST_CTRL0, DPHY_TESTCLR);
     usleep(15);
     reg_wr(d->base, DPHY_TST_CTRL0, 0);
     usleep(15);
+
+    /* 3. Enable clock lane + all active data lanes.
+     *    Written AFTER TESTCLR so a TESTCLR-triggered reset cannot clear it.
+     *    DPHY_CTRL0 is a lane-enable bitmap: bit 0 = clock, bits [1+n] = data n. */
+    {
+        uint32_t ctrl0 = DPHY_CTRL0_CLOCK_LANE_EN;
+        for (int i = 0; i < d->nlanes; i++)
+            ctrl0 |= DPHY_CTRL0_DATA_LANE_EN(i);
+        fprintf(stderr, "[dphy] CTRL0 before write: 0x%08x\n",
+                reg_rd(d->base, DPHY_CTRL0));
+        reg_wr(d->base, DPHY_CTRL0, ctrl0);   /* e.g. 0x7 for 2 lanes */
+        fprintf(stderr, "[dphy] CTRL0 after  write: 0x%08x (wrote 0x%02x)\n",
+                reg_rd(d->base, DPHY_CTRL0), ctrl0);
+    }
 
     /*
      * 4. Program HSFREQRANGE via the test interface.

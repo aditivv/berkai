@@ -78,12 +78,25 @@
  * If CSI2_STATUS reads 0xFFFFFFFF, the offset is wrong.
  * Cross-check with: sudo cat /sys/bus/platform/devices/ADDR:csi0/resource on Linux.
  */
-/* Offsets confirmed from rp1.dtsi csi@110000 reg[0..2] */
-#define RP1_CSI0_MIPICFG_OFFSET 0x00120000ULL  /* MIPI CFG (clock gate/mux)  */
+/*
+ * CAM/DISP 0 connector (physical) → CSI1 hardware block in RP1.
+ * RPi5 naming is inverted: CAM/DISP 0 → CSI1, CAM/DISP 1 → CSI0.
+ *
+ * CSI1 offsets from rp1.dtsi csi@128000 reg[0..2]:
+ *   reg[0] = <0xc0 0x40128000 ...>  → BAR0 + 0x128000  (DMA)
+ *   reg[1] = <0xc0 0x4012c000 ...>  → BAR0 + 0x12C000  (DPHY)
+ *   reg[2] = <0xc0 0x40138000 ...>  → BAR0 + 0x138000  (MIPI CFG)
+ *
+ * Pattern check: CSI1 offsets mirror CSI0 with base shifted +0x18000:
+ *   DMA:      0x110000 → 0x128000  (+0x18000) ✓
+ *   DPHY:     0x114000 → 0x12C000  (+0x18000) ✓
+ *   MIPI CFG: 0x120000 → 0x138000  (+0x18000) ✓
+ */
+#define RP1_CSI0_MIPICFG_OFFSET 0x00138000ULL  /* MIPI CFG (CSI1 / CAM0 connector) */
 #define RP1_CSI0_MIPICFG_SIZE   0x100u
-#define RP1_CSI0_DMA_OFFSET     0x00110000ULL  /* CSI-2 DMA registers        */
-#define RP1_CSI0_DMA_SIZE       0x100u
-#define RP1_CSI0_DPHY_OFFSET    0x00114000ULL  /* D-PHY / CSI Host registers */
+#define RP1_CSI0_DMA_OFFSET     0x00128000ULL  /* CSI-2 DMA registers (CSI1)        */
+#define RP1_CSI0_DMA_SIZE       0x200u
+#define RP1_CSI0_DPHY_OFFSET    0x0012C000ULL  /* D-PHY registers (CSI1)            */
 #define RP1_CSI0_DPHY_SIZE      0x200u
 
 /*
@@ -612,6 +625,8 @@ int main(int argc, char *argv[])
                        CAPTURE_VC, CAPTURE_DT);
 
     /* Snapshot discards + STOPSTATE before polling — tells us which failure mode */
+    fprintf(stderr, "[diag] DPHY  RX               = 0x%08x\n",
+            dphy_regs [DPHY_RX                  >> 2]);
     fprintf(stderr, "[diag] DPHY  STOPSTATE        = 0x%08x (want 0x3)\n",
             dphy_regs [DPHY_STOPSTATE           >> 2]);
     fprintf(stderr, "[diag] CSI2  DISCARDS_OVERFLOW  = 0x%08x\n",
