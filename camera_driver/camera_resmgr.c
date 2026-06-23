@@ -497,38 +497,27 @@ int main(int argc, char *argv[])
                                              RP1_CSI0_DPHY_SIZE);
     if (!dphy_regs) return 1;
 
-    /* Initialise DPHY (2 lanes, 450 Mbps) */
+    /*
+     * Initialise DPHY context but do NOT wait for stop-state yet.
+     * The D-PHY stop-state (LP-11) is driven by the sensor; the sensor must
+     * be powered and idle before LP-11 appears on the lanes.  We bring the
+     * sensor up in Step 2 below, then wait for stop-state after that.
+     */
     static dphy_t dphy;
     dphy_init(&dphy, dphy_regs, 2);
     dphy_start(&dphy);
+    fprintf(stderr, "[dphy] reset released — will verify stop-state after sensor init\n");
 
-    if (dphy_wait_stop(&dphy, DPHY_TIMEOUT_MS) != 0) {
-        fprintf(stderr, "FATAL: D-PHY stop-state timeout — "
-                "check DPHY register offset (RP1_CSI0_DPHY_OFFSET=0x%08llX)\n",
-                (unsigned long long)RP1_CSI0_DPHY_OFFSET);
-        return 1;
-    }
-
-    /* Initialise CSI-2 RX */
+    /* Pre-init CSI-2 context (open_rx called after sensor is up) */
     static csi2_t csi2;
     csi2_init(&csi2, csi2_regs, &dphy, 2);
-    csi2_open_rx(&csi2);
     g_csi2 = &csi2;
-
-    uint32_t status = csi2_read_status(&csi2);
-    fprintf(stderr, "[step1] CSI2_STATUS = 0x%08x\n", status);
-    if (status & CSI2_STATUS_PHY_ERRORS) {
-        fprintf(stderr, "WARNING: D-PHY errors in STATUS bits [4:0] = 0x%02x\n",
-                status & CSI2_STATUS_PHY_ERRORS);
-        fprintf(stderr, "  This can mean: wrong DPHY offset, bad cable, "
-                "or sensor not yet powered\n");
-        fprintf(stderr, "  Continuing — errors may clear once sensor starts\n");
-    } else {
-        fprintf(stderr, "[step1] OK — no PHY errors\n");
-    }
 
     /* ------------------------------------------------------------------
      * STEP 2: IMX708 I2C sensor initialisation
+     *
+     * Must happen before dphy_wait_stop(): the sensor drives LP-11 on the
+     * CSI-2 lanes once powered.  Waiting before this will always timeout.
      * ------------------------------------------------------------------ */
     fprintf(stderr, "\n--- Step 2: IMX708 I2C init ---\n");
 
@@ -544,6 +533,30 @@ int main(int argc, char *argv[])
         return 1;
     }
     fprintf(stderr, "[step2] IMX708 sensor initialised and streaming\n");
+
+    /* ------------------------------------------------------------------
+     * Back to Step 1: now that the sensor is up, verify D-PHY stop-state
+     * and open the CSI-2 RX.
+     * ------------------------------------------------------------------ */
+    fprintf(stderr, "\n--- Step 1 (cont): DPHY stop-state + CSI-2 RX ---\n");
+
+    if (dphy_wait_stop(&dphy, DPHY_TIMEOUT_MS) != 0) {
+        fprintf(stderr, "WARNING: D-PHY stop-state timeout (STOPSTATE=0) — "
+                "sensor may need a power-enable GPIO (CAM1 GPIO45).\n");
+        fprintf(stderr, "  Continuing anyway; DMA may still work if sensor streams.\n");
+    }
+
+    csi2_open_rx(&csi2);
+
+    uint32_t status = csi2_read_status(&csi2);
+    fprintf(stderr, "[step1] CSI2_STATUS = 0x%08x\n", status);
+    if (status & CSI2_STATUS_PHY_ERRORS) {
+        fprintf(stderr, "WARNING: D-PHY errors in STATUS bits [4:0] = 0x%02x\n",
+                status & CSI2_STATUS_PHY_ERRORS);
+        fprintf(stderr, "  Continuing — errors typically clear once HS data arrives\n");
+    } else {
+        fprintf(stderr, "[step1] OK — no PHY errors\n");
+    }
 
     /* ------------------------------------------------------------------
      * STEP 3: DMA buffer allocation + start channel
