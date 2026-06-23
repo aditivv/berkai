@@ -19,13 +19,12 @@
  *         # then on PC: ffmpeg -f rawvideo -pixel_format bayer_rggb10 \
  *         #   -video_size 2304x1296 -i frame.raw frame.png
  *
- * RP1 register offsets within BAR0 (from rp1.dtsi, Linux rpi-6.12.y):
- *   MIPI CFG  : RP1_BAR0 + 0x00120000  ← MUST write SEL_CSI=1 here first
- *   CSI0 DMA  : RP1_BAR0 + 0x00110000
- *   CSI0 DPHY : RP1_BAR0 + 0x00114000
+ * RP1 register offsets within BAR0 — camera connected to CAM/DISP 0:
+ *   CAM/DISP 0 → CSI1 hardware block (RPi5 naming is inverted)
+ *   MIPI CFG  : RP1_BAR0 + 0x00138000  ← MUST write SEL_CSI=1 here first
+ *   CSI1 DMA  : RP1_BAR0 + 0x00128000
+ *   CSI1 DPHY : RP1_BAR0 + 0x0012C000  (DW CSI-2 Host + D-PHY, not raw DPHY)
  *
- * Derivation: rp1.dtsi reg[0]=<0xc0 0x40110000> → RP1-internal addr 0xc040110000.
- * RP1 internal bus base = 0xc040000000, so BAR0 offset = 0x110000.
  * All three blocks must be mapped; MIPI_CFG must be programmed first or
  * the CSI2/DPHY blocks are gated (all reads return 0xFFFFFFFF).
  */
@@ -625,10 +624,10 @@ int main(int argc, char *argv[])
                        CAPTURE_VC, CAPTURE_DT);
 
     /* Snapshot discards + STOPSTATE before polling — tells us which failure mode */
-    fprintf(stderr, "[diag] DPHY  RX               = 0x%08x\n",
-            dphy_regs [DPHY_RX                  >> 2]);
-    fprintf(stderr, "[diag] DPHY  STOPSTATE        = 0x%08x (want 0x3)\n",
-            dphy_regs [DPHY_STOPSTATE           >> 2]);
+    fprintf(stderr, "[diag] DPHY  PHY_RX           = 0x%08x\n",
+            dphy_regs [DPHY_PHY_RX              >> 2]);
+    fprintf(stderr, "[diag] DPHY  PHY_STOPSTATE    = 0x%08x (want 0x3)\n",
+            dphy_regs [DPHY_PHY_STOPSTATE       >> 2]);
     fprintf(stderr, "[diag] CSI2  DISCARDS_OVERFLOW  = 0x%08x\n",
             csi2_regs[CSI2_DISCARDS_OVERFLOW    >> 2]);
     fprintf(stderr, "[diag] CSI2  DISCARDS_INACTIVE  = 0x%08x\n",
@@ -660,8 +659,8 @@ int main(int argc, char *argv[])
                 frames_seen, FRAME_SKIP_COUNT,
                 csi2_read_frame_count(&csi2, CAPTURE_CHANNEL));
         /* Second snapshot — shows if discards accumulated during the wait */
-        fprintf(stderr, "[diag] DPHY  STOPSTATE        = 0x%08x\n",
-                dphy_regs [DPHY_STOPSTATE           >> 2]);
+        fprintf(stderr, "[diag] DPHY  PHY_STOPSTATE    = 0x%08x\n",
+                dphy_regs [DPHY_PHY_STOPSTATE       >> 2]);
         fprintf(stderr, "[diag] CSI2  DISCARDS_OVERFLOW  = 0x%08x\n",
                 csi2_regs[CSI2_DISCARDS_OVERFLOW    >> 2]);
         fprintf(stderr, "[diag] CSI2  DISCARDS_INACTIVE  = 0x%08x\n",
