@@ -29,8 +29,9 @@
 
 /* Enable / soft-reset */
 #define DPHY_CTRL1              0x04
-#define   DPHY_SHUTDOWNZ        (1u << 0)
-#define   DPHY_RSTZ             (1u << 1)
+#define   DPHY_SHUTDOWNZ                (1u << 0)
+#define   DPHY_RSTZ                     (1u << 1)
+#define   DPHY_BASEDIR_PERIPHERAL       (1u << 2)  /* RX mode; MUST be set for CSI-2 input */
 
 /* Receive status - read to confirm lanes are in stop state */
 #define DPHY_RX                 0x08

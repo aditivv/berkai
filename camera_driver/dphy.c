@@ -101,9 +101,16 @@ void dphy_start(dphy_t *d)
     /* 5. Power up */
     reg_wr(d->base, DPHY_CTRL1, DPHY_SHUTDOWNZ);     /* shutdown released */
     usleep(15);
-    reg_wr(d->base, DPHY_CTRL1, DPHY_SHUTDOWNZ | DPHY_RSTZ); /* reset released */
+    /*
+     * Final power-up: release RSTZ and set BASEDIR_PERIPHERAL.
+     * BASEDIR_PERIPHERAL (bit 2) configures the DW DPHY as a *receiver*.
+     * Without it the PHY is in transmitter/master mode and never detects
+     * the LP-11 stop-state driven by the sensor — STOPSTATE stays 0.
+     */
+    reg_wr(d->base, DPHY_CTRL1,
+           DPHY_SHUTDOWNZ | DPHY_RSTZ | DPHY_BASEDIR_PERIPHERAL);
 
-    fprintf(stderr, "[dphy] reset released (CTRL0=0x%02x, CTRL1=0x%02x)\n",
+    fprintf(stderr, "[dphy] reset released (CTRL0=0x%08x, CTRL1=0x%08x)\n",
             reg_rd(d->base, DPHY_CTRL0), reg_rd(d->base, DPHY_CTRL1));
 }
 

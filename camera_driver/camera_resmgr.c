@@ -611,6 +611,18 @@ int main(int argc, char *argv[])
                        IMX708_2X2_LINE_BYTES, FRAME_HEIGHT, FRAME_WIDTH,
                        CAPTURE_VC, CAPTURE_DT);
 
+    /* Snapshot discards + STOPSTATE before polling — tells us which failure mode */
+    fprintf(stderr, "[diag] DPHY  STOPSTATE        = 0x%08x (want 0x3)\n",
+            dphy_regs [DPHY_STOPSTATE           >> 2]);
+    fprintf(stderr, "[diag] CSI2  DISCARDS_OVERFLOW  = 0x%08x\n",
+            csi2_regs[CSI2_DISCARDS_OVERFLOW    >> 2]);
+    fprintf(stderr, "[diag] CSI2  DISCARDS_INACTIVE  = 0x%08x\n",
+            csi2_regs[CSI2_DISCARDS_INACTIVE    >> 2]);
+    fprintf(stderr, "[diag] CSI2  DISCARDS_UNMATCHED = 0x%08x\n",
+            csi2_regs[CSI2_DISCARDS_UNMATCHED   >> 2]);
+    fprintf(stderr, "[diag] CSI2  DISCARDS_LEN_LIMIT = 0x%08x\n",
+            csi2_regs[CSI2_DISCARDS_LEN_LIMIT   >> 2]);
+
     /* Wait for the first few frames to arrive, confirm via CH_DEBUG */
     fprintf(stderr, "[step3] waiting for first %d frames (sensor warm-up)...\n",
             FRAME_SKIP_COUNT);
@@ -632,6 +644,15 @@ int main(int argc, char *argv[])
                 "(frame_count=%u)\n",
                 frames_seen, FRAME_SKIP_COUNT,
                 csi2_read_frame_count(&csi2, CAPTURE_CHANNEL));
+        /* Second snapshot — shows if discards accumulated during the wait */
+        fprintf(stderr, "[diag] DPHY  STOPSTATE        = 0x%08x\n",
+                dphy_regs [DPHY_STOPSTATE           >> 2]);
+        fprintf(stderr, "[diag] CSI2  DISCARDS_OVERFLOW  = 0x%08x\n",
+                csi2_regs[CSI2_DISCARDS_OVERFLOW    >> 2]);
+        fprintf(stderr, "[diag] CSI2  DISCARDS_INACTIVE  = 0x%08x\n",
+                csi2_regs[CSI2_DISCARDS_INACTIVE    >> 2]);
+        fprintf(stderr, "[diag] CSI2  DISCARDS_UNMATCHED = 0x%08x\n",
+                csi2_regs[CSI2_DISCARDS_UNMATCHED   >> 2]);
         fprintf(stderr, "  If CH_DEBUG stays 0, the DMA isn't receiving data.\n");
         fprintf(stderr, "  Check: sensor streaming (Step 2 OK?), "
                 "CSI2 channel offsets, cable\n");
