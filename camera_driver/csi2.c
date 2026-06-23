@@ -4,12 +4,9 @@
  * Ported from linux/drivers/media/platform/raspberrypi/rp1_cfe/csi2.c
  * rpi-6.12.y branch, Raspberry Pi Ltd.
  *
- * Key changes vs. Linux:
- *   readl/writel    → reg_rd / reg_wr (volatile pointer, byte-offset / 4)
- *   dma_addr_t      → uint64_t physical address
- *   dev_dbg/warn    → fprintf(stderr, ...)
- *   V4L2 / DMA API  → removed; caller supplies physical buf address
- *   usleep_range    → usleep()
+ * Register offsets verified against the Linux source.  Previous version
+ * had completely wrong offsets (channel stride 0x10 vs real 0x40, wrong
+ * STATUS/CTRL locations, non-existent N_LANES register, etc.).
  */
 
 #include <stdio.h>
@@ -18,7 +15,7 @@
 #include "csi2.h"
 
 /* -----------------------------------------------------------------------
- * Register helpers (same pattern as dphy.c)
+ * Register helpers
  * ----------------------------------------------------------------------- */
 
 static inline uint32_t reg_rd(volatile uint32_t *base, uint32_t off)
@@ -44,87 +41,95 @@ void csi2_init(csi2_t *c, volatile uint32_t *base, dphy_t *dphy, int nlanes)
 
 void csi2_open_rx(csi2_t *c)
 {
-    fprintf(stderr, "[csi2] opening RX, %d lane(s)\n", c->nlanes);
+    fprintf(stderr, "[csi2] opening RX (%d lanes)\n", c->nlanes);
 
-    /* Soft-reset (self-clearing) */
-    reg_wr(c->base, CSI2_CTRL, CSI2_CTRL_SRST);
-    usleep(100);
+    /*
+     * CSI2_IRQ_MASK gates the hardware interrupt line for error/overflow
+     * conditions only; it does not affect STATUS updates or CH_DEBUG counts.
+     * Set to 0 — we are polling, not using HW interrupts.
+     */
+    reg_wr(c->base, CSI2_IRQ_MASK, 0);
 
-    /* Clear any stale status bits */
-    csi2_clear_status(c);
+    /*
+     * Start the DPHY.  Must happen after sensor is streaming so the DPHY
+     * can lock to the LP-11 idle state the sensor drives between bursts.
+     */
+    dphy_start(c->dphy);
 
-    /* Set number of active lanes (write N-1) */
-    reg_wr(c->base, CSI2_N_LANES, CSI2_N_LANES_VAL(c->nlanes - 1));
+    /*
+     * EOP_IS_EOL: treat each packet end as a line end.
+     * Required for correct DMA line-packing of RAW Bayer data.
+     */
+    reg_wr(c->base, CSI2_CTRL, EOP_IS_EOL);
 
-    /* Enable CSI-2 receiver */
-    reg_wr(c->base, CSI2_CTRL, CSI2_CTRL_EN);
-
-    fprintf(stderr, "[csi2] RX enabled, STATUS=0x%08x\n",
-            reg_rd(c->base, CSI2_STATUS));
+    fprintf(stderr, "[csi2] RX enabled, STATUS=0x%08x CTRL=0x%08x\n",
+            reg_rd(c->base, CSI2_STATUS),
+            reg_rd(c->base, CSI2_CTRL));
 }
 
 void csi2_start_channel(csi2_t *c, int ch,
                          uint64_t buf_phys,
-                         uint32_t width, uint32_t height,
+                         uint32_t stride, uint32_t height, uint32_t width_px,
                          int vc, int dt)
 {
-    /*
-     * All size/address values are right-shifted >>4 before writing:
-     * the hardware stores them in units of 16 bytes.
+    uint32_t size = stride * height;   /* total bytes in one frame */
+    uint64_t addr = buf_phys >> 4;     /* addresses are in units of 16 bytes */
+
+    fprintf(stderr, "[csi2] ch%d start: phys=0x%016llx size=%u "
+            "stride=%u h=%u w_px=%u vc=%d dt=0x%02x\n",
+            ch, (unsigned long long)buf_phys, size,
+            stride, height, width_px, vc, dt);
+
+    /* 1. Disable channel and clear debug counter */
+    reg_wr(c->base, CSI2_CH_CTRL(ch),  0);
+    reg_wr(c->base, CSI2_CH_DEBUG(ch), 0);
+
+    /* 2. Clear this channel's interrupt flags in STATUS (W1C) */
+    reg_wr(c->base, CSI2_STATUS, IRQ_CH_MASK(ch));
+
+    /* 3. Build CH_CTRL:
+     *      DMA_EN    = enable DMA
+     *      PACK_LINE = one AXI burst per line (required for correct packing)
+     *      VC field  = bits [6:5]
+     *      DT field  = bits [12:7]
      *
-     * buf_phys must be 16-byte aligned (guaranteed by mmap contiguous alloc).
+     * Note: we do NOT set IRQ_EN_FE_ACK here because we poll CH_DEBUG.
+     * Set it if/when HW interrupts are wired up.
      */
-    uint32_t buf_size  = width * height;
-    uint32_t stride    = width;
+    uint32_t ctrl = DMA_EN | PACK_LINE;
+    ctrl |= ((uint32_t)vc << VC_SHIFT) & VC_MASK;
+    ctrl |= ((uint32_t)dt << DT_SHIFT) & DT_MASK;
 
-    /* Address split: RP1 DMA uses 40-bit physical addresses.
-     * CH_ADDR1 holds bits [63:36] of (phys >> 4).
-     * CH_ADDR0 holds bits [31:0]  of (phys >> 4). */
-    uint64_t addr_shifted = buf_phys >> 4;
-    uint32_t addr0 = (uint32_t)(addr_shifted & 0xFFFFFFFFu);
-    uint32_t addr1 = (uint32_t)(addr_shifted >> 32);
+    /* 4. Set frame geometry (height in pixels [31:16], width in pixels [15:0]).
+     *    The DMA uses this to detect frame boundaries independent of packet
+     *    count, providing robustness against dropped lines. */
+    reg_wr(c->base, CSI2_CH_FRAME_SIZE(ch), (height << 16) | width_px);
 
-    fprintf(stderr, "[csi2] ch%d start: buf_phys=0x%016llx size=%u "
-            "stride=%u vc=%d dt=0x%02x\n",
-            ch, (unsigned long long)buf_phys, buf_size, stride, vc, dt);
-
-    /*
-     * Build CH_CTRL word.
-     * Bits [6:5]  = VC
-     * Bits [13:8] = DT
-     * Other flags: CH_CTRL_EN | CH_CTRL_IRQ_FE_ACK | CH_CTRL_PACK_LINE
-     */
-    uint32_t ctrl = CH_CTRL_EN
-                  | CH_CTRL_IRQ_FE         /* interrupt on frame end        */
-                  | CH_CTRL_IRQ_FE_ACK     /* ack-cleared variant           */
-                  | CH_CTRL_PACK_LINE      /* pack: one AXI burst per line  */
-                  | ((uint32_t)vc << CH_CTRL_VC_SHIFT)
-                  | ((uint32_t)dt << CH_CTRL_DT_SHIFT);
-
-    /*
-     * Write order is important:
-     *   1. LENGTH and STRIDE first (don't trigger anything)
-     *   2. CTRL (arms IRQs, sets VC/DT filter)
-     *   3. ADDR1 (high bits)
-     *   4. ADDR0 LAST — writing ADDR0 causes HW to latch the full
-     *      address into the double-buffer, arming the next capture.
-     */
-    reg_wr(c->base, CSI2_CH_LENGTH(ch),     buf_size >> 4);
-    reg_wr(c->base, CSI2_CH_STRIDE_REG(ch), stride >> 4);
-    reg_wr(c->base, CSI2_CH_CTRL(ch),       ctrl);
-    reg_wr(c->base, CSI2_CH_ADDR1(ch),      addr1);
-    reg_wr(c->base, CSI2_CH_ADDR0(ch),      addr0); /* MUST be last */
+    /* 5. Write buffer registers.
+     *    ADDR0 MUST be written LAST — it latches all other channel registers
+     *    into the hardware double-buffer, arming the DMA for the next frame. */
+    reg_wr(c->base, CSI2_CH_LENGTH(ch), size   >> 4);
+    reg_wr(c->base, CSI2_CH_STRIDE(ch), stride >> 4);
+    reg_wr(c->base, CSI2_CH_CTRL(ch),   ctrl);
+    reg_wr(c->base, CSI2_CH_ADDR1(ch),  (uint32_t)(addr >> 32));
+    reg_wr(c->base, CSI2_CH_ADDR0(ch),  (uint32_t)(addr & 0xFFFFFFFFu)); /* ARM */
 
     fprintf(stderr, "[csi2] ch%d armed: CTRL=0x%08x ADDR0=0x%08x "
-            "ADDR1=0x%08x\n", ch, ctrl, addr0, addr1);
+            "ADDR1=0x%08x LENGTH=0x%08x STRIDE=0x%08x\n",
+            ch, ctrl,
+            (uint32_t)(addr & 0xFFFFFFFFu),
+            (uint32_t)(addr >> 32),
+            size   >> 4,
+            stride >> 4);
 }
 
 void csi2_stop_channel(csi2_t *c, int ch)
 {
-    /* Clear EN bit in CH_CTRL */
-    uint32_t ctrl = reg_rd(c->base, CSI2_CH_CTRL(ch));
-    ctrl &= ~CH_CTRL_EN;
-    reg_wr(c->base, CSI2_CH_CTRL(ch), ctrl);
+    /* FORCE stops capture immediately, even mid-frame */
+    reg_wr(c->base, CSI2_CH_CTRL(ch), FORCE);
+    /* Writing ADDR0=0 latches the FORCE bit into HW */
+    reg_wr(c->base, CSI2_CH_ADDR0(ch), 0);
+    reg_wr(c->base, CSI2_CH_ADDR0(ch), 0);  /* Linux does this twice */
     fprintf(stderr, "[csi2] ch%d stopped\n", ch);
 }
 
@@ -133,9 +138,10 @@ uint32_t csi2_read_status(csi2_t *c)
     return reg_rd(c->base, CSI2_STATUS);
 }
 
-uint32_t csi2_read_debug(csi2_t *c, int ch)
+uint32_t csi2_read_frame_count(csi2_t *c, int ch)
 {
-    return reg_rd(c->base, CSI2_CH_DEBUG(ch));
+    /* Frame counter lives in CH_DEBUG bits [31:16] */
+    return reg_rd(c->base, CSI2_CH_DEBUG(ch)) >> CH_DEBUG_FRAME_SHIFT;
 }
 
 void csi2_clear_status(csi2_t *c)
@@ -145,13 +151,8 @@ void csi2_clear_status(csi2_t *c)
 
 void csi2_close(csi2_t *c)
 {
-    /* Disable all channels */
     for (int ch = 0; ch < 4; ch++)
         csi2_stop_channel(c, ch);
-
-    /* Soft-reset */
-    reg_wr(c->base, CSI2_CTRL, CSI2_CTRL_SRST);
-    usleep(100);
-    reg_wr(c->base, CSI2_CTRL, 0);
+    dphy_stop(c->dphy);
     fprintf(stderr, "[csi2] closed\n");
 }

@@ -615,31 +615,30 @@ int main(int argc, char *argv[])
     }
 
     csi2_start_channel(&csi2, CAPTURE_CHANNEL, (uint64_t)dma_phys,
-                       IMX708_2X2_LINE_BYTES, FRAME_HEIGHT,
+                       IMX708_2X2_LINE_BYTES, FRAME_HEIGHT, FRAME_WIDTH,
                        CAPTURE_VC, CAPTURE_DT);
 
     /* Wait for the first few frames to arrive, confirm via CH_DEBUG */
     fprintf(stderr, "[step3] waiting for first %d frames (sensor warm-up)...\n",
             FRAME_SKIP_COUNT);
-    uint32_t last_debug = 0;
+    uint32_t last_fc = 0;
     int frames_seen = 0;
     for (int attempts = 0; attempts < 5000 && frames_seen < FRAME_SKIP_COUNT;
          attempts++) {
         usleep(5000);   /* 5 ms */
-        uint32_t dbg = csi2_read_debug(&csi2, CAPTURE_CHANNEL);
-        uint16_t fc  = dbg & 0xFFFF;        /* frame counter in low 16 bits */
-        if (fc != (last_debug & 0xFFFF)) {
+        uint32_t fc = csi2_read_frame_count(&csi2, CAPTURE_CHANNEL);
+        if (fc != last_fc) {
             frames_seen++;
-            fprintf(stderr, "[step3] frame %d received (CH_DEBUG=0x%08x)\n",
-                    frames_seen, dbg);
-            last_debug = dbg;
+            fprintf(stderr, "[step3] frame %d received (frame_count=%u)\n",
+                    frames_seen, fc);
+            last_fc = fc;
         }
     }
     if (frames_seen < FRAME_SKIP_COUNT) {
         fprintf(stderr, "WARNING: only saw %d/%d warm-up frames "
-                "(CH_DEBUG=0x%08x)\n",
+                "(frame_count=%u)\n",
                 frames_seen, FRAME_SKIP_COUNT,
-                csi2_read_debug(&csi2, CAPTURE_CHANNEL));
+                csi2_read_frame_count(&csi2, CAPTURE_CHANNEL));
         fprintf(stderr, "  If CH_DEBUG stays 0, the DMA isn't receiving data.\n");
         fprintf(stderr, "  Check: sensor streaming (Step 2 OK?), "
                 "CSI2 channel offsets, cable\n");
