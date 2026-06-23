@@ -31,7 +31,7 @@
  * On RPi5, the camera I2C bus (GPIO22/23, CAM1) typically appears as
  * /dev/i2c6 on Linux.  Check with: i2cdetect -l  on Linux, or ls /dev/i2c*
  * on QNX after the i2c resource manager starts. */
-#define IMX708_I2C_BUS          "/dev/i2c2"
+#define IMX708_I2C_BUS          "/dev/i2c6"
 
 #define IMX708_REG_CHIP_ID      0x0016
 #define IMX708_CHIP_ID          0x0708      /* expected value (16-bit read) */

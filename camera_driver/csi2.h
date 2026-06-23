@@ -4,9 +4,10 @@
  * Ported from linux/drivers/media/platform/raspberrypi/rp1_cfe/csi2.h
  * rpi-6.12.y branch, Raspberry Pi Ltd.
  *
- * RP1 address map (from rp1.dtsi):
- *   CSI0 DMA base = RP1_BAR0 + 0x00C0B000, size 0x100
- *   CSI1 DMA base = RP1_BAR0 + 0x00C0D000, size 0x100
+ * RP1 address map (confirmed from rp1.dtsi, Linux rpi-6.12.y):
+ *   MIPI CFG base = RP1_BAR0 + 0x00120000  ← write SEL_CSI=1 before using CSI2
+ *   CSI0 DMA base = RP1_BAR0 + 0x00110000, size 0x100
+ *   CSI0 DPHY     = RP1_BAR0 + 0x00114000, size 0x100
  *
  * RP1's CSI-2 block has 4 independent DMA channels (VC0..VC3).
  * Each channel captures one Virtual Channel / Data Type pair.

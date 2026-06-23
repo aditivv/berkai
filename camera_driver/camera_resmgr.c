@@ -19,12 +19,15 @@
  *         # then on PC: ffmpeg -f rawvideo -pixel_format bayer_rggb10 \
  *         #   -video_size 2304x1296 -i frame.raw frame.png
  *
- * RP1 register base addresses (from rp1.dtsi, Linux rpi-6.12.y):
- *   CSI0 DMA  : RP1_BAR0 + 0x00C0B000
- *   CSI0 DPHY : RP1_BAR0 + 0x00C0B700
+ * RP1 register offsets within BAR0 (from rp1.dtsi, Linux rpi-6.12.y):
+ *   MIPI CFG  : RP1_BAR0 + 0x00120000  ← MUST write SEL_CSI=1 here first
+ *   CSI0 DMA  : RP1_BAR0 + 0x00110000
+ *   CSI0 DPHY : RP1_BAR0 + 0x00114000
  *
- * VERIFY these with `pci-tool -v -b 0x1de4` on the Pi.
- * If they are wrong the STATUS read in Step 1 will show garbage or 0xFFFFFFFF.
+ * Derivation: rp1.dtsi reg[0]=<0xc0 0x40110000> → RP1-internal addr 0xc040110000.
+ * RP1 internal bus base = 0xc040000000, so BAR0 offset = 0x110000.
+ * All three blocks must be mapped; MIPI_CFG must be programmed first or
+ * the CSI2/DPHY blocks are gated (all reads return 0xFFFFFFFF).
  */
 
 /* =========================================================================
@@ -75,10 +78,21 @@
  * If CSI2_STATUS reads 0xFFFFFFFF, the offset is wrong.
  * Cross-check with: sudo cat /sys/bus/platform/devices/ADDR:csi0/resource on Linux.
  */
-#define RP1_CSI0_DMA_OFFSET     0x00C0B000ULL  /* CSI-2 DMA registers      */
+/* Offsets confirmed from rp1.dtsi csi@110000 reg[0..2] */
+#define RP1_CSI0_MIPICFG_OFFSET 0x00120000ULL  /* MIPI CFG (clock gate/mux)  */
+#define RP1_CSI0_MIPICFG_SIZE   0x100u
+#define RP1_CSI0_DMA_OFFSET     0x00110000ULL  /* CSI-2 DMA registers        */
 #define RP1_CSI0_DMA_SIZE       0x100u
-#define RP1_CSI0_DPHY_OFFSET    0x00C0B700ULL  /* D-PHY registers           */
+#define RP1_CSI0_DPHY_OFFSET    0x00114000ULL  /* D-PHY / CSI Host registers */
 #define RP1_CSI0_DPHY_SIZE      0x200u
+
+/*
+ * MIPI CFG register to select CSI vs DSI mode.
+ * Must write MIPICFG_CFG_SEL_CSI=1 before any CSI2/DPHY access.
+ * Source: cfe.c cfe_start_streaming() line 1158
+ */
+#define MIPICFG_CFG_REG         0x004u         /* offset within MIPI_CFG     */
+#define MIPICFG_CFG_SEL_CSI     (1u << 0)      /* 1=CSI, 0=DSI               */
 
 /* CSI-2 channel used for image capture (VC0) */
 #define CAPTURE_CHANNEL         0
@@ -459,6 +473,19 @@ int main(int argc, char *argv[])
     fprintf(stderr, "\n--- Step 1: RP1 register mapping ---\n");
     fprintf(stderr, "[step1] RP1 BAR0 phys base = 0x%016llx\n",
             (unsigned long long)RP1_BAR0_PHYS);
+
+    /*
+     * CRITICAL: Map MIPI_CFG first and set SEL_CSI=1.
+     * Until this write the CSI2/DPHY blocks are in DSI mode and every
+     * register read returns 0xFFFFFFFF.
+     * (Linux: cfe_start_streaming() → cfg_reg_write(MIPICFG_CFG, SEL_CSI))
+     */
+    volatile uint32_t *mipi_cfg_regs = rp1_map(RP1_CSI0_MIPICFG_OFFSET,
+                                                RP1_CSI0_MIPICFG_SIZE);
+    if (!mipi_cfg_regs) return 1;
+    mipi_cfg_regs[MIPICFG_CFG_REG >> 2] = MIPICFG_CFG_SEL_CSI;
+    fprintf(stderr, "[mipicfg] SEL_CSI written (readback=0x%08x)\n",
+            mipi_cfg_regs[MIPICFG_CFG_REG >> 2]);
 
     /* Map CSI-2 DMA registers */
     volatile uint32_t *csi2_regs = rp1_map(RP1_CSI0_DMA_OFFSET,
