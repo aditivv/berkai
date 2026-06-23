@@ -210,6 +210,15 @@ static int imx708_read16(uint16_t reg, uint16_t *out)
         return -1;
     }
 
+    /* Dump raw buffer to diagnose buffer-layout vs. power issues.
+     * If sensor is powered, expect 0x07 and 0x08 somewhere in [0..3].
+     * If all zeros, sensor is likely unpowered (needs camera power GPIO). */
+    fprintf(stderr, "[i2c] read16 reg=0x%04x raw[0..3]: "
+            "%02x %02x %02x %02x\n",
+            reg,
+            msg.data[0], msg.data[1], msg.data[2], msg.data[3]);
+
+    /* Standard layout: recv bytes follow send bytes in the buffer */
     *out = ((uint16_t)msg.data[2] << 8) | (uint16_t)msg.data[3];
     return 0;
 }
@@ -229,11 +238,47 @@ static int imx708_write_regs(const imx708_reg_t *regs, size_t n)
 }
 
 /*
+ * imx708_probe_bus - send a 1-byte I2C write to IMX708_I2C_ADDR and check
+ * for ACK.  Returns EOK if the device responded, non-zero (EIO/ENXIO) if NAK.
+ * Used to identify which /dev/i2cN has the sensor before the full init.
+ */
+static int imx708_probe_bus(const char *bus_path)
+{
+    int fd = open(bus_path, O_RDWR);
+    if (fd < 0) return errno;
+
+    struct {
+        i2c_send_t hdr;
+        uint8_t    data[1];
+    } probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.hdr.slave.addr = IMX708_I2C_ADDR;
+    probe.hdr.slave.fmt  = I2C_ADDRFMT_7BIT;
+    probe.hdr.len        = 1;   /* 1 dummy byte — enough to get an ACK/NAK */
+    probe.hdr.stop       = 1;
+    probe.data[0]        = 0;
+
+    int r = devctl(fd, DCMD_I2C_SEND, &probe, sizeof(probe), NULL);
+    close(fd);
+    return r;
+}
+
+/*
  * imx708_init - open I2C, verify chip ID, write init tables, stream on.
  * Pass test_mode=1 to enable sensor color bars (useful during bring-up).
  */
 static int imx708_init(int test_mode)
 {
+    /* Scan the two known I2C buses so we can report which has the sensor */
+    static const char *buses[] = { "/dev/i2c1", "/dev/i2c6", NULL };
+    for (int b = 0; buses[b]; b++) {
+        int r = imx708_probe_bus(buses[b]);
+        fprintf(stderr, "[i2c] probe 0x%02x on %-12s → %s\n",
+                IMX708_I2C_ADDR, buses[b],
+                r == EOK ? "ACK  ← sensor here"
+                         : "NAK (not present or unpowered)");
+    }
+
     i2c_fd = open(IMX708_I2C_BUS, O_RDWR);
     if (i2c_fd < 0) {
         fprintf(stderr, "[i2c] open %s failed: %s\n",
