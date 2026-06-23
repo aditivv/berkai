@@ -223,6 +223,38 @@
       transition: opacity .3s;
     }
     #panel-hint.hidden { opacity: 0; }
+
+    /* ── Pipe segment detail overlay ── */
+    #pipe-detail {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: #13162a; display: none; flex-direction: column; z-index: 20;
+    }
+    #pipe-detail.active { display: flex; }
+    #pipe-detail-header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 10px 16px; border-bottom: 1px solid #2a2d3e; flex-shrink: 0;
+    }
+    #btn-back {
+      background: none; border: 1px solid #2a2d3e; color: #777;
+      padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    #btn-back:hover { color: #ccc; border-color: #555; }
+    #detail-segment-name { font-size: 15px; font-weight: 600; color: #fff; }
+    #detail-meta { margin-left: auto; display: flex; gap: 16px; color: #888; font-size: 12px; }
+    #detail-meta b { color: #ccc; }
+    #pipe-diagram-wrap { padding: 20px 28px 8px; flex-shrink: 0; }
+    #pipe-svg { width: 100%; height: 130px; }
+    #pipe-detect-list {
+      padding: 0 24px 16px; flex: 1; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; min-height: 0;
+    }
+    .detect-item {
+      padding: 8px 12px; border-radius: 6px; background: #ffffff08;
+      border-left: 3px solid; font-size: 12px;
+    }
+    .detect-label { font-weight: 700; }
+    .detect-sub { color: #888; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -263,6 +295,44 @@
 
       <!-- Click-hint (fades when panel opens) -->
       <div id="panel-hint">Click any node to inspect</div>
+
+      <!-- Pipe segment detail view (overlays map when a node is selected) -->
+      <div id="pipe-detail">
+        <div id="pipe-detail-header">
+          <button id="btn-back" onclick="closePanel()">← Overview</button>
+          <div>
+            <div id="detail-segment-name">—</div>
+            <span id="detail-badge" style="margin-top:4px;display:inline-block;">—</span>
+          </div>
+          <div id="detail-meta">
+            <span>Temp: <b id="detail-temp-val">—</b> °C</span>
+            <span>Trend: <b id="detail-trend-val">—</b></span>
+          </div>
+        </div>
+        <div id="pipe-diagram-wrap">
+          <svg id="pipe-svg" viewBox="0 0 1000 160" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <linearGradient id="pipe-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stop-color="#4a5a7a"/>
+                <stop offset="35%"  stop-color="#3a4a6a"/>
+                <stop offset="100%" stop-color="#243050"/>
+              </linearGradient>
+              <linearGradient id="pipe-sheen" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stop-color="rgba(255,255,255,0.10)"/>
+                <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+              </linearGradient>
+            </defs>
+            <rect id="pipe-body" x="90" y="44" width="820" height="72" rx="36"
+                  fill="url(#pipe-fill)" stroke="#4a5568" stroke-width="2"/>
+            <rect x="90" y="44" width="820" height="28" rx="36"
+                  fill="url(#pipe-sheen)" pointer-events="none"/>
+            <text x="45"  y="82" text-anchor="middle" fill="#556" font-size="11" font-weight="600">INTAKE</text>
+            <text x="955" y="82" text-anchor="middle" fill="#556" font-size="11" font-weight="600">OUTFLOW</text>
+            <g id="pipe-crack-markers"></g>
+          </svg>
+        </div>
+        <div id="pipe-detect-list"></div>
+      </div>
     </div>
 
     <!-- Detail panel -->
@@ -390,20 +460,22 @@
         iconAnchor: [13, 13]
       });
       L.marker([node.lat, node.lng], { icon }).addTo(map)
-        .on('click', () => openPanel(node.id));
+        .on('click', () => openNode(node.id));
     });
 
     // Start polling immediately — Leaflet needs no async 'load' event
     poll();
     setInterval(poll, POLL_INTERVAL);
 
-    // ── PANEL ─────────────────────────────────────────────────────────────────────
-    function openPanel(nodeId) {
+    // ── PANEL + PIPE DETAIL ───────────────────────────────────────────────────────
+    let _detectionInterval = null;
+
+    function openNode(nodeId) {
       selectedNodeId = nodeId;
       document.getElementById('panel-hint').classList.add('hidden');
       document.getElementById('panel').classList.add('open');
       document.getElementById('camera-stream').style.display = 'block';
-      map.invalidateSize();
+      _openPipeDetail(nodeId);
       refreshPanel();
     }
 
@@ -411,7 +483,102 @@
       selectedNodeId = null;
       document.getElementById('panel').classList.remove('open');
       document.getElementById('panel-hint').classList.remove('hidden');
+      document.getElementById('pipe-detail').classList.remove('active');
+      if (_detectionInterval) { clearInterval(_detectionInterval); _detectionInterval = null; }
       map.invalidateSize();
+    }
+
+    function _openPipeDetail(nodeId) {
+      const node = NODES.find(n => n.id === nodeId);
+      if (!node) return;
+      _syncDetailHeader(node);
+      _renderPipeSvg(node.state, []);
+      document.getElementById('pipe-detect-list').innerHTML = '';
+      document.getElementById('pipe-detail').classList.add('active');
+      if (_detectionInterval) clearInterval(_detectionInterval);
+      _fetchDetections();
+      _detectionInterval = setInterval(_fetchDetections, 3000);
+    }
+
+    function _syncDetailHeader(node) {
+      document.getElementById('detail-segment-name').textContent = node.name;
+      document.getElementById('detail-temp-val').textContent = node.temp != null ? node.temp : '—';
+      document.getElementById('detail-trend-val').textContent = node.trend || '—';
+      const color = stateColor(node.state);
+      const badge = document.getElementById('detail-badge');
+      badge.textContent = node.state.toUpperCase();
+      badge.style.cssText = `background:${color}22;color:${color};border:1px solid ${color}66;` +
+        'padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:.5px;';
+    }
+
+    async function _fetchDetections() {
+      try {
+        const res = await fetch('/api/detections');
+        const data = await res.json();
+        const node = selectedNodeId !== null ? NODES.find(n => n.id === selectedNodeId) : null;
+        if (!node) return;
+        _syncDetailHeader(node);
+        _renderPipeSvg(node.state, data.detections);
+        _renderDetectionList(data.detections);
+      } catch (e) {}
+    }
+
+    function _renderPipeSvg(state, detections) {
+      const g = document.getElementById('pipe-crack-markers');
+      g.innerHTML = '';
+      const X0 = 90, W = 820, Y0 = 44, H = 72;
+      const CAM_W = 640, CAM_H = 480;
+      const ns = 'http://www.w3.org/2000/svg';
+      const mk = (tag, attrs) => {
+        const el = document.createElementNS(ns, tag);
+        Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+        return el;
+      };
+
+      document.getElementById('pipe-body').setAttribute('stroke', stateColor(state));
+
+      if (detections.length === 0) {
+        const t = mk('text', { x: X0 + W / 2, y: Y0 + H / 2,
+          'text-anchor': 'middle', 'dominant-baseline': 'middle',
+          fill: '#4caf5066', 'font-size': 13 });
+        t.textContent = '✓ No defects detected';
+        g.appendChild(t);
+        return;
+      }
+
+      detections.forEach(det => {
+        const [x1, y1, x2, y2] = det.bbox;
+        const svgX = X0 + ((x1 + x2) / 2 / CAM_W) * W;
+        const svgY = Y0 + ((y1 + y2) / 2 / CAM_H) * H;
+        const color = det.confidence > 0.7 ? '#ef4444' : '#f97316';
+        const r = Math.max(6, Math.min(18, 6 + det.confidence * 14));
+
+        g.appendChild(mk('circle', { cx: svgX, cy: svgY, r: r + 8, fill: `${color}14` }));
+        g.appendChild(mk('circle', { cx: svgX, cy: svgY, r,
+          fill: `${color}55`, stroke: color, 'stroke-width': 2 }));
+        g.appendChild(mk('line', { x1: svgX, y1: Y0 + H, x2: svgX, y2: Y0 + H + 10,
+          stroke: color, 'stroke-width': 1, 'stroke-dasharray': '3,2' }));
+        const lbl = mk('text', { x: svgX, y: Y0 + H + 22,
+          'text-anchor': 'middle', fill: color, 'font-size': 11 });
+        lbl.textContent = `${Math.round(det.confidence * 100)}%`;
+        g.appendChild(lbl);
+      });
+    }
+
+    function _renderDetectionList(detections) {
+      const list = document.getElementById('pipe-detect-list');
+      if (detections.length === 0) {
+        list.innerHTML = '<p style="color:#4caf50;font-size:13px;margin:0;padding:4px 0">No active defects detected</p>';
+        return;
+      }
+      list.innerHTML = detections.map((d, i) => {
+        const color = d.confidence > 0.7 ? '#ef4444' : '#f97316';
+        const px = Math.round((d.bbox[0] + d.bbox[2]) / 2);
+        return `<div class="detect-item" style="border-color:${color}">
+          <div class="detect-label" style="color:${color}">CRACK #${i + 1}</div>
+          <div class="detect-sub">Confidence: ${Math.round(d.confidence * 100)}% &nbsp;·&nbsp; Camera x-pos: ${px}px</div>
+        </div>`;
+      }).join('');
     }
 
     function refreshPanel() {
@@ -440,6 +607,11 @@
       // Tint the camera placeholder border to match state
       document.getElementById('camera-feed').style.borderColor =
         node.state !== 'normal' ? `${color}66` : '#2a2d3e';
+
+      // Keep pipe detail header in sync when open
+      if (document.getElementById('pipe-detail').classList.contains('active')) {
+        _syncDetailHeader(node);
+      }
     }
 
     // ── FORCE ANOMALY (demo) ──────────────────────────────────────────────────────
