@@ -218,8 +218,9 @@ static int imx708_read16(uint16_t reg, uint16_t *out)
             reg,
             msg.data[0], msg.data[1], msg.data[2], msg.data[3]);
 
-    /* Standard layout: recv bytes follow send bytes in the buffer */
-    *out = ((uint16_t)msg.data[2] << 8) | (uint16_t)msg.data[3];
+    /* QNX DCMD_I2C_SENDRECV places received bytes at offset 0 (not send_len).
+     * raw[0]=chip_id_hi, raw[1]=chip_id_lo, raw[2..3]=sent addr bytes (stale). */
+    *out = ((uint16_t)msg.data[0] << 8) | (uint16_t)msg.data[1];
     return 0;
 }
 
