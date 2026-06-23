@@ -371,15 +371,8 @@
       container: 'map',
       style: {
         version: 8,
-        sources: {
-          osm: {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          }
-        },
-        layers: [{ id: 'osm-raster', type: 'raster', source: 'osm' }]
+        sources: {},
+        layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#1a2035' } }]
       },
       center: [32.865, 39.925],
       zoom: 13
