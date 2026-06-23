@@ -596,13 +596,6 @@ int main(int argc, char *argv[])
 
     uint32_t status = csi2_read_status(&csi2);
     fprintf(stderr, "[step1] CSI2_STATUS = 0x%08x\n", status);
-    if (status & CSI2_STATUS_PHY_ERRORS) {
-        fprintf(stderr, "WARNING: D-PHY errors in STATUS bits [4:0] = 0x%02x\n",
-                status & CSI2_STATUS_PHY_ERRORS);
-        fprintf(stderr, "  Continuing — errors typically clear once HS data arrives\n");
-    } else {
-        fprintf(stderr, "[step1] OK — no PHY errors\n");
-    }
 
     /* ------------------------------------------------------------------
      * STEP 3: DMA buffer allocation + start channel
