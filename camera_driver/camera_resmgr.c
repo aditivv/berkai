@@ -76,6 +76,19 @@
 #define RP1_BAR0_PHYS           0x1f00000000ULL
 
 /*
+ * PCIe inbound DMA window base.
+ *
+ * RP1's DMA engines reach system RAM through the BCM2712 PCIe inbound window.
+ * Per the Pi5 dma-ranges, RP1 address 0x10_00000000 maps (identity) to PCIe
+ * 0x10_00000000, which the root complex maps to system RAM at 0x0.  So the
+ * address RP1 must be programmed with = this base + the CPU-physical address.
+ *
+ * Linux hides this behind videobuf2/dma-ranges; on QNX we must add it
+ * ourselves (mem_offset64 returns the raw CPU-physical address).
+ */
+#define RP1_DMA_RAM_WINDOW_BASE 0x1000000000ULL
+
+/*
  * Register offsets within RP1 BAR0.
  * Source: rp1.dtsi, Linux rpi-6.12.y (reg-names "csi2" and "dphy").
  *
@@ -795,7 +808,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    csi2_start_channel(&csi2, CAPTURE_CHANNEL, (uint64_t)dma_phys,
+    csi2_start_channel(&csi2, CAPTURE_CHANNEL,
+                       (uint64_t)dma_phys + RP1_DMA_RAM_WINDOW_BASE,
                        IMX708_2X2_LINE_BYTES, FRAME_HEIGHT, FRAME_WIDTH,
                        CAPTURE_VC, CAPTURE_DT);
 
@@ -834,6 +848,22 @@ int main(int argc, char *argv[])
      * the RP1 capture path; if it's unchanged (or 0xFF), the sensor itself
      * is not streaming and the issue is sensor-side config. */
     imx708_dump_state("post-wait");
+
+    /* Did pixel data actually land in our buffer? Scan for non-zero bytes.
+     * If this is 0, the DMA address translation is still wrong (frames are
+     * counted but the bytes went elsewhere). If non-zero, we have real data. */
+    {
+        const volatile uint8_t *p = (const volatile uint8_t *)dma_virt;
+        size_t nz = 0, first = (size_t)-1;
+        for (size_t i = 0; i < FRAME_BYTES; i++) {
+            if (p[i]) { nz++; if (first == (size_t)-1) first = i; }
+        }
+        fprintf(stderr, "[diag] DMA buffer: %zu / %u non-zero bytes",
+                nz, (unsigned)FRAME_BYTES);
+        if (first != (size_t)-1)
+            fprintf(stderr, " (first at offset %zu)", first);
+        fprintf(stderr, "\n");
+    }
 
     if (frames_seen < FRAME_SKIP_COUNT) {
         fprintf(stderr, "WARNING: only saw %d/%d warm-up frames "
