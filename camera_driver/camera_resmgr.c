@@ -298,6 +298,51 @@ static int imx708_read16(uint16_t reg, uint16_t *out)
 }
 
 /*
+ * imx708_read8 - read a single 8-bit register (16-bit address).
+ */
+static int imx708_read8(uint16_t reg, uint8_t *out)
+{
+    struct {
+        i2c_sendrecv_t hdr;
+        uint8_t        data[2];   /* 2 sent, 1 received */
+    } msg;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.hdr.slave.addr = IMX708_I2C_ADDR;
+    msg.hdr.slave.fmt  = I2C_ADDRFMT_7BIT;
+    msg.hdr.send_len   = 2;
+    msg.hdr.recv_len   = 1;
+    msg.hdr.stop       = 1;
+    msg.data[0] = (reg >> 8) & 0xFF;
+    msg.data[1] = reg & 0xFF;
+
+    if (devctl(i2c_fd, DCMD_I2C_SENDRECV, &msg, sizeof(msg), NULL) != EOK)
+        return -1;
+    *out = msg.data[0];   /* received byte lands at offset 0 */
+    return 0;
+}
+
+/*
+ * imx708_dump_state - read back a few sensor registers to see what the sensor
+ * actually thinks it's doing.  Key register: FRM_CNT (0x0005) — a CCS-standard
+ * live frame counter that increments every frame while streaming and reads
+ * 0xFF in standby.  If it changes between two calls, the sensor IS producing
+ * frames (problem is downstream); if static, the sensor isn't streaming.
+ * Also reads MODE_SELECT (0x0100): should be 0x01 if our stream-on stuck.
+ */
+static void imx708_dump_state(const char *when)
+{
+    uint8_t frm = 0, mode = 0, frl_hi = 0, frl_lo = 0;
+    imx708_read8(0x0005, &frm);                 /* FRM_CNT  */
+    imx708_read8(IMX708_REG_MODE_SELECT, &mode);/* 0x0100   */
+    imx708_read8(0x0340, &frl_hi);              /* frame_length_lines hi */
+    imx708_read8(0x0341, &frl_lo);              /* frame_length_lines lo */
+    fprintf(stderr, "[imx708:%s] FRM_CNT(0x0005)=0x%02x  MODE(0x0100)=0x%02x  "
+            "frame_len(0x0340:41)=0x%02x%02x\n",
+            when, frm, mode, frl_hi, frl_lo);
+}
+
+/*
  * imx708_write_regs - write a table of (addr, val) pairs.
  */
 static int imx708_write_regs(const imx708_reg_t *regs, size_t n)
@@ -662,6 +707,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     fprintf(stderr, "[step2] IMX708 sensor initialised and streaming\n");
+    imx708_dump_state("post-stream-on");   /* baseline FRM_CNT */
 
     /* ------------------------------------------------------------------
      * Back to Step 1: now that the sensor is up, verify D-PHY stop-state
@@ -726,6 +772,12 @@ int main(int argc, char *argv[])
             last_fc = fc;
         }
     }
+    /* Re-read the sensor's own frame counter. If FRM_CNT advanced since
+     * post-stream-on, the sensor IS producing frames and the problem is in
+     * the RP1 capture path; if it's unchanged (or 0xFF), the sensor itself
+     * is not streaming and the issue is sensor-side config. */
+    imx708_dump_state("post-wait");
+
     if (frames_seen < FRAME_SKIP_COUNT) {
         fprintf(stderr, "WARNING: only saw %d/%d warm-up frames "
                 "(frame_count=%u)\n",
