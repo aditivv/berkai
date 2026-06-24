@@ -19,11 +19,16 @@
  *         # then on PC: ffmpeg -f rawvideo -pixel_format bayer_rggb10 \
  *         #   -video_size 2304x1296 -i frame.raw frame.png
  *
- * RP1 register offsets within BAR0 — camera connected to CAM/DISP 0:
- *   CAM/DISP 0 → CSI1 hardware block (RPi5 naming is inverted)
- *   MIPI CFG  : RP1_BAR0 + 0x00138000  ← MUST write SEL_CSI=1 here first
- *   CSI1 DMA  : RP1_BAR0 + 0x00128000
- *   CSI1 DPHY : RP1_BAR0 + 0x0012C000  (DW CSI-2 Host + D-PHY, not raw DPHY)
+ * RP1 register offsets within BAR0 — camera connected to the CD0 connector:
+ *   The sensor answers on /dev/i2c6 (gpio38/39 muxed to i2c, confirmed by
+ *   GPIO funcsel dump).  Per the Pi5 device tree, the CD0 connector bundles
+ *   i2c6 + csi0 + cam0_reg(gpio34) as ONE connector, so the sensor's MIPI
+ *   lanes terminate at the CSI0 hardware block — NOT CSI1.
+ *   (Earlier code used CSI1 based on an "inverted naming" assumption; the
+ *    register/GPIO dumps disproved it — see change log below.)
+ *   MIPI CFG  : RP1_BAR0 + 0x00120000  ← MUST write SEL_CSI=1 here first
+ *   CSI0 DMA  : RP1_BAR0 + 0x00110000
+ *   CSI0 DPHY : RP1_BAR0 + 0x00114000  (DW CSI-2 Host + D-PHY, not raw DPHY)
  *
  * All three blocks must be mapped; MIPI_CFG must be programmed first or
  * the CSI2/DPHY blocks are gated (all reads return 0xFFFFFFFF).
@@ -78,24 +83,28 @@
  * Cross-check with: sudo cat /sys/bus/platform/devices/ADDR:csi0/resource on Linux.
  */
 /*
- * CAM/DISP 0 connector (physical) → CSI1 hardware block in RP1.
- * RPi5 naming is inverted: CAM/DISP 0 → CSI1, CAM/DISP 1 → CSI0.
+ * CD0 connector → CSI0 hardware block in RP1.
  *
- * CSI1 offsets from rp1.dtsi csi@128000 reg[0..2]:
- *   reg[0] = <0xc0 0x40128000 ...>  → BAR0 + 0x128000  (DMA)
- *   reg[1] = <0xc0 0x4012c000 ...>  → BAR0 + 0x12C000  (DPHY)
- *   reg[2] = <0xc0 0x40138000 ...>  → BAR0 + 0x138000  (MIPI CFG)
+ * Evidence (from rp1_clk_dump GPIO bank decode + Pi5 device tree):
+ *   - i2c6 (gpio38/39) is muxed to the i2c function (funcsel 3) and the
+ *     sensor ACKs there; the CD1 pins gpio40/41 are idle (funcsel 5/RIO).
+ *     => the camera is physically on the CD0 connector.
+ *   - Pi5 DT pairs CD0 = i2c6 = csi0 = cam0_reg(gpio34).  cam0_reg is already
+ *     driven high (RIO bank2 OUT/OE bit0 = 1) so analog power is on.
  *
- * Pattern check: CSI1 offsets mirror CSI0 with base shifted +0x18000:
- *   DMA:      0x110000 → 0x128000  (+0x18000) ✓
- *   DPHY:     0x114000 → 0x12C000  (+0x18000) ✓
- *   MIPI CFG: 0x120000 → 0x138000  (+0x18000) ✓
+ * CSI0 offsets from rp1.dtsi csi@110000 reg[0..2]:
+ *   reg[0] = <0xc0 0x40110000 ...>  → BAR0 + 0x110000  (DMA)
+ *   reg[1] = <0xc0 0x40114000 ...>  → BAR0 + 0x114000  (DPHY / DW CSI-2 Host)
+ *   reg[2] = <0xc0 0x40120000 ...>  → BAR0 + 0x120000  (MIPI CFG)
+ *
+ * NOTE: macro names keep the RP1_CSI0_ prefix; the values below are now the
+ * real CSI0 offsets (previously they held CSI1 offsets by mistake).
  */
-#define RP1_CSI0_MIPICFG_OFFSET 0x00138000ULL  /* MIPI CFG (CSI1 / CAM0 connector) */
+#define RP1_CSI0_MIPICFG_OFFSET 0x00120000ULL  /* MIPI CFG (CSI0 / CD0 connector)  */
 #define RP1_CSI0_MIPICFG_SIZE   0x100u
-#define RP1_CSI0_DMA_OFFSET     0x00128000ULL  /* CSI-2 DMA registers (CSI1)        */
+#define RP1_CSI0_DMA_OFFSET     0x00110000ULL  /* CSI-2 DMA registers (CSI0)        */
 #define RP1_CSI0_DMA_SIZE       0x200u
-#define RP1_CSI0_DPHY_OFFSET    0x0012C000ULL  /* D-PHY registers (CSI1)            */
+#define RP1_CSI0_DPHY_OFFSET    0x00114000ULL  /* D-PHY registers (CSI0)            */
 #define RP1_CSI0_DPHY_SIZE      0x200u
 
 /*
@@ -599,8 +608,10 @@ int main(int argc, char *argv[])
     fprintf(stderr, "\n--- Step 1 (cont): DPHY stop-state + CSI-2 RX ---\n");
 
     if (dphy_wait_stop(&dphy, DPHY_TIMEOUT_MS) != 0) {
-        fprintf(stderr, "WARNING: D-PHY stop-state timeout (STOPSTATE=0) — "
-                "sensor may need a power-enable GPIO (CAM1 GPIO45).\n");
+        fprintf(stderr, "WARNING: D-PHY stop-state timeout (STOPSTATE=0) on CSI0.\n");
+        fprintf(stderr, "  Power is on (cam0_reg/gpio34 driven high). If STOPSTATE\n");
+        fprintf(stderr, "  stays 0 here, suspect: missing 24MHz INCK, or sensor not\n");
+        fprintf(stderr, "  streaming. (CSI block confirmed: CD0 connector -> CSI0.)\n");
         fprintf(stderr, "  Continuing anyway; DMA may still work if sensor streams.\n");
     }
 

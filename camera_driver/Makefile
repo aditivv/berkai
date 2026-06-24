@@ -25,13 +25,21 @@ SRCS    = camera_resmgr.c csi2.c dphy.c
 OBJS    = $(SRCS:.c=.o)
 TARGET  = camera_resmgr
 
+# Standalone diagnostic: dumps RP1 clock/GPIO registers from QNX (no Linux boot).
+DUMP_TARGET = rp1_clk_dump
+
 .PHONY: all clean install
 
-all: $(TARGET)
+all: $(TARGET) $(DUMP_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	@echo "Built: $(TARGET)"
+
+# Single-file tool, built independently of the resmgr.
+$(DUMP_TARGET): rp1_clk_dump.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	@echo "Built: $(DUMP_TARGET)  (run: ./$(DUMP_TARGET) | tee clk_dump.txt)"
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -41,4 +49,4 @@ install: $(TARGET)
 	@echo "Installed: /usr/sbin/$(TARGET)"
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) $(DUMP_TARGET)
