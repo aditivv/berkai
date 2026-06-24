@@ -220,6 +220,51 @@ static int rp1_enable_mipi0_cfg_clock(void)
 }
 
 /* =========================================================================
+ * Camera power-on reset (cam0_reg regulator via RP1 GPIO34)
+ *
+ * On Pi5 the IMX708's 2.7V analog supply is gated by cam0_reg, enabled by
+ * driving RP1 GPIO34 high (DT: cam0_reg gpio = <&rp1_gpio 34>).  The boot
+ * firmware leaves it high, so QNX never resets the sensor — it gets
+ * configured in whatever state it booted into.  Linux power-cycles the
+ * regulator (imx708_power_on/off) on every bring-up.  Replicate that:
+ * drive GPIO34 low, wait, drive high, wait the regulator startup delay,
+ * giving the sensor a clean power-on reset before I2C config.
+ *
+ * GPIO34 = RIO bank2 (0xe8000), bit 0 (confirmed by rp1_clk_dump).
+ * RIO register layout: OUT=+0x00, OE=+0x04.
+ * Delays from the imx708 overlay: off-on = 30ms, startup = 70ms.
+ * ========================================================================= */
+#define RP1_RIO2_OFFSET         0x000E8000ULL
+#define RP1_RIO2_SIZE           0x1000u
+#define RIO_OUT                 0x00u
+#define RIO_OE                  0x04u
+#define CAM0_REG_GPIO34_BIT     (1u << 0)
+
+static int rp1_camera_power_cycle(void)
+{
+    volatile uint32_t *rio = rp1_map(RP1_RIO2_OFFSET, RP1_RIO2_SIZE);
+    if (!rio)
+        return -1;
+
+    /* gpio34 must be an output (it already is; ensure it). */
+    rio[RIO_OE >> 2] |= CAM0_REG_GPIO34_BIT;
+
+    /* Power OFF: drive cam0_reg low. */
+    rio[RIO_OUT >> 2] &= ~CAM0_REG_GPIO34_BIT;
+    fprintf(stderr, "[pwr] cam0_reg OFF (gpio34 low), OUT=0x%08x\n",
+            rio[RIO_OUT >> 2]);
+    usleep(30000);   /* off-on-delay 30 ms */
+
+    /* Power ON: drive cam0_reg high. */
+    rio[RIO_OUT >> 2] |= CAM0_REG_GPIO34_BIT;
+    fprintf(stderr, "[pwr] cam0_reg ON  (gpio34 high), OUT=0x%08x\n",
+            rio[RIO_OUT >> 2]);
+    usleep(70000);   /* startup-delay 70 ms (regulator ramp + sensor POR) */
+
+    return 0;
+}
+
+/* =========================================================================
  * Step 2 helpers — IMX708 I2C sensor init
  * ========================================================================= */
 
@@ -694,6 +739,13 @@ int main(int argc, char *argv[])
      * CSI-2 lanes once powered.  Waiting before this will always timeout.
      * ------------------------------------------------------------------ */
     fprintf(stderr, "\n--- Step 2: IMX708 I2C init ---\n");
+
+    /* Clean power-on reset of the sensor before configuring it (Linux does
+     * this on every bring-up; QNX inherited a firmware-enabled regulator and
+     * never reset the sensor — likely why it accepts config but never streams
+     * frames). */
+    if (rp1_camera_power_cycle() != 0)
+        fprintf(stderr, "WARNING: camera power-cycle failed; continuing\n");
 
     if (imx708_init(test_mode) != 0) {
         fprintf(stderr, "FATAL: IMX708 init failed\n");
