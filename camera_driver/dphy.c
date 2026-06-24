@@ -178,8 +178,13 @@ static void dphy_hw_init(dphy_t *d)
     set_tstclr(d, 0);
     usleep(15);
 
-    /* Program HS receive frequency range */
-    dphy_set_hsfreqrange(d, 450);   /* IMX708 2x2bin: 450 Mbps/lane */
+    /* Program HS receive frequency range.
+     * IMX708 link_freq = 450 MHz; D-PHY data rate = 2 × link_freq (DDR) =
+     * 900 Mbps/lane (confirmed from Linux rp1_cfe cfe.c: link_freq *= 2).
+     * 900 Mbps → table code 0b001010 → data byte 0x14.
+     * (Was 450 here, which gave 0x2C and mis-sampled the HS data: lanes
+     *  reached LP-11 but RAW10 packets were corrupted and never captured.) */
+    dphy_set_hsfreqrange(d, 900);
 
     /* Power up the PHY */
     usleep(5);
