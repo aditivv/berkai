@@ -523,11 +523,20 @@
       } catch (e) {}
     }
 
+    // Larger bbox area = crack is close to camera (near intake).
+    // Smaller bbox area = crack is far away (deeper toward outflow).
+    // Returns 0 (intake) → 1 (outflow).
+    function _bboxDepth(bbox) {
+      const area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
+      const maxArea = 640 * 480 * 0.30; // ~30% of frame = very close
+      return 1 - Math.min(1, Math.max(0, area / maxArea));
+    }
+
     function _renderPipeSvg(state, detections) {
       const g = document.getElementById('pipe-crack-markers');
       g.innerHTML = '';
       const X0 = 90, W = 820, Y0 = 44, H = 72;
-      const CAM_W = 640, CAM_H = 480;
+      const CAM_H = 480;
       const ns = 'http://www.w3.org/2000/svg';
       const mk = (tag, attrs) => {
         const el = document.createElementNS(ns, tag);
@@ -548,8 +557,8 @@
 
       detections.forEach(det => {
         const [x1, y1, x2, y2] = det.bbox;
-        const svgX = X0 + ((x1 + x2) / 2 / CAM_W) * W;
-        const svgY = Y0 + ((y1 + y2) / 2 / CAM_H) * H;
+        const svgX = X0 + _bboxDepth(det.bbox) * W;            // depth → pipe position
+        const svgY = Y0 + ((y1 + y2) / 2 / CAM_H) * H;        // camera y → pipe top/bottom
         const color = det.confidence > 0.7 ? '#ef4444' : '#f97316';
         const r = Math.max(6, Math.min(18, 6 + det.confidence * 14));
 
@@ -573,10 +582,11 @@
       }
       list.innerHTML = detections.map((d, i) => {
         const color = d.confidence > 0.7 ? '#ef4444' : '#f97316';
-        const px = Math.round((d.bbox[0] + d.bbox[2]) / 2);
+        const depth = _bboxDepth(d.bbox);
+        const pos = depth < 0.33 ? 'Near intake' : depth < 0.66 ? 'Mid-section' : 'Near outflow';
         return `<div class="detect-item" style="border-color:${color}">
           <div class="detect-label" style="color:${color}">CRACK #${i + 1}</div>
-          <div class="detect-sub">Confidence: ${Math.round(d.confidence * 100)}% &nbsp;·&nbsp; Camera x-pos: ${px}px</div>
+          <div class="detect-sub">Confidence: ${Math.round(d.confidence * 100)}% &nbsp;·&nbsp; ${pos}</div>
         </div>`;
       }).join('');
     }
