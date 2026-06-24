@@ -630,14 +630,19 @@ static int io_read(resmgr_context_t *ctp, io_read_t *msg, iofunc_ocb_t *ocb_base
 {
     video_ocb_t *ocb = (video_ocb_t *)ocb_base;
 
-    /* Wait for a new frame if we've consumed the current one */
-    if (ocb->offset == 0) {
-        uint32_t target = ocb->last_frame + 1;
-        /* Spin-wait for the frame counter to advance.
-         * A production driver would use MsgReceivePulse on intr_chid. */
-        while (frame_count < target)
-            usleep(1000);   /* 1 ms */
-        ocb->last_frame = frame_count;
+    /* Wait for a new frame if we've consumed the current one.
+     * Poll the CH_DEBUG frame counter (which AUTO_ARM keeps advancing), not
+     * the interrupt-only global frame_count — interrupts aren't wired up, so
+     * that counter never moves and the old code would block forever. */
+    if (ocb->offset == 0 && g_csi2) {
+        uint32_t start = csi2_read_frame_count(g_csi2, CAPTURE_CHANNEL);
+        uint32_t cur   = start;
+        int waited     = 0;
+        while (cur == start && waited++ < 3000) {  /* wait up to ~3 s */
+            usleep(1000);
+            cur = csi2_read_frame_count(g_csi2, CAPTURE_CHANNEL);
+        }
+        ocb->last_frame = cur;
     }
 
     /* How many bytes can we serve? */

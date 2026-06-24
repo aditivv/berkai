@@ -90,7 +90,10 @@ void csi2_start_channel(csi2_t *c, int ch,
      * Note: we do NOT set IRQ_EN_FE_ACK here because we poll CH_DEBUG.
      * Set it if/when HW interrupts are wired up.
      */
-    uint32_t ctrl = DMA_EN | PACK_LINE;
+    /* AUTO_ARM: re-arm the channel automatically after each frame so capture
+     * is continuous.  Without it the channel grabs exactly one frame then goes
+     * inactive, and all subsequent frames show up in DISCARDS_INACTIVE. */
+    uint32_t ctrl = DMA_EN | AUTO_ARM | PACK_LINE;
     ctrl |= ((uint32_t)vc << VC_SHIFT) & VC_MASK;
     ctrl |= ((uint32_t)dt << DT_SHIFT) & DT_MASK;
 
