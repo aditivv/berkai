@@ -168,6 +168,58 @@ static volatile uint32_t *rp1_map(uint64_t phys_offset, uint32_t size)
 }
 
 /* =========================================================================
+ * RP1 CLOCKS block — enable the CSI0 MIPI config clock (RP1_CLK_MIPI0_CFG)
+ *
+ * QNX boot leaves this clock disabled (confirmed by rp1_clk_dump:
+ * CLK_MIPI0_CFG_CTRL @ 0x180c4 reads 0).  The DW CSI-2 Host APB registers are
+ * still readable on the always-on system clock, but the D-PHY *functional*
+ * logic — including LP-11 stop-state detection that drives PHY_STOPSTATE —
+ * runs on this config clock.  With it off, STOPSTATE can never assert no
+ * matter what the sensor transmits.  Linux rp1-cfe enables it during CSI
+ * bring-up; we must do the same.
+ *
+ * Register map + sequence from Linux clk-rp1.c:
+ *   CLOCKS block base   = RP1_BAR0 + 0x18000
+ *   CLK_MIPI0_CFG_CTRL    = +0x0c4   (ENABLE = BIT(11), AUXSRC = bits[9:5])
+ *   CLK_MIPI0_CFG_DIV_INT = +0x0c8   (integer divider)
+ *   parent = xosc (50 MHz), target 25 MHz  → div_int = 2
+ *   enable = set AUXSRC=0 (xosc) + CLK_CTRL_ENABLE
+ * ========================================================================= */
+#define RP1_CLOCKS_OFFSET       0x00018000ULL
+#define RP1_CLOCKS_SIZE         0x1000u
+#define CLK_MIPI0_CFG_CTRL      0x0C4u      /* offset within CLOCKS block */
+#define CLK_MIPI0_CFG_DIV_INT   0x0C8u
+#define CLK_CTRL_ENABLE         (1u << 11)
+#define CLK_MIPI0_CFG_DIV       2u          /* 50 MHz xosc / 2 = 25 MHz   */
+
+static int rp1_enable_mipi0_cfg_clock(void)
+{
+    volatile uint32_t *clk = rp1_map(RP1_CLOCKS_OFFSET, RP1_CLOCKS_SIZE);
+    if (!clk)
+        return -1;
+
+    /* Integer divider: xosc(50 MHz) / 2 = 25 MHz (matches DT 25000000). */
+    clk[CLK_MIPI0_CFG_DIV_INT >> 2] = CLK_MIPI0_CFG_DIV;
+
+    /* CTRL: AUXSRC field = 0 selects xosc; set ENABLE (bit 11).
+     * Matches rp1_clock_set_parent(xosc) + rp1_clock_on() in clk-rp1.c.
+     * (The hardware sets the high status bits, e.g. 0x10000000, itself.) */
+    clk[CLK_MIPI0_CFG_CTRL >> 2] = CLK_CTRL_ENABLE;
+
+    uint32_t ctrl = clk[CLK_MIPI0_CFG_CTRL >> 2];
+    uint32_t div  = clk[CLK_MIPI0_CFG_DIV_INT >> 2];
+    fprintf(stderr, "[clk] MIPI0_CFG: CTRL=0x%08x DIV_INT=0x%08x "
+            "(want bit11 set, div=2 → 25MHz)\n", ctrl, div);
+
+    if (!(ctrl & CLK_CTRL_ENABLE)) {
+        fprintf(stderr, "[clk] WARNING: ENABLE bit did not stick — "
+                "MIPI0_CFG clock may still be off\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* =========================================================================
  * Step 2 helpers — IMX708 I2C sensor init
  * ========================================================================= */
 
@@ -540,6 +592,16 @@ int main(int argc, char *argv[])
     fprintf(stderr, "\n--- Step 1: RP1 register mapping ---\n");
     fprintf(stderr, "[step1] RP1 BAR0 phys base = 0x%016llx\n",
             (unsigned long long)RP1_BAR0_PHYS);
+
+    /*
+     * CRITICAL (added): enable the CSI0 MIPI config clock BEFORE any DPHY/CSI
+     * access.  Without it the D-PHY functional logic is unclocked and
+     * PHY_STOPSTATE stays 0 forever (the symptom we chased for a long time).
+     */
+    if (rp1_enable_mipi0_cfg_clock() != 0) {
+        fprintf(stderr, "FATAL: could not enable RP1_CLK_MIPI0_CFG\n");
+        return 1;
+    }
 
     /*
      * CRITICAL: Map MIPI_CFG first and set SEL_CSI=1.
