@@ -1,41 +1,54 @@
 """
-AI triage — YOLO-based pipe defect detection.
+AI triage — ONNX-based YOLO pipe defect detection.
 
-Loads runs/detect/train-2/weights/best.pt (trained on the pipe defects dataset).
-Falls back to OpenCV edge detection if the model file is missing or ultralytics
-is not installed.
+Uses onnxruntime (tiny footprint) instead of PyTorch/ultralytics on the Pi.
+Requires: runs/detect/train-2/weights/best.onnx  (export on laptop with:
+    python -c "from ultralytics import YOLO; YOLO('runs/detect/train-2/weights/best.pt').export(format='onnx', imgsz=640, simplify=True)"
+Falls back to OpenCV edge detection if the ONNX file or onnxruntime is missing.
 
 Tunable via environment variables:
-  YOLO_CONF          detection confidence threshold (default 0.25)
-  CRACK_MIN_AREA     fallback OpenCV: min contour area (default 200)
-  CRACK_ASPECT_RATIO fallback OpenCV: min length/width ratio (default 3.5)
-  CRACK_CANNY_LOW    fallback OpenCV: Canny lower threshold (default 50)
-  CRACK_CANNY_HIGH   fallback OpenCV: Canny upper threshold (default 150)
+  YOLO_CONF          confidence threshold (default 0.25)
+  YOLO_IOU           NMS IoU threshold    (default 0.45)
 """
 
 import os
+import ast
 import cv2
 import numpy as np
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'runs', 'detect', 'train-2', 'weights', 'best.pt')
+ONNX_PATH = os.path.join(os.path.dirname(__file__),
+                         'runs', 'detect', 'train-2', 'weights', 'best.onnx')
 CONF_THRESHOLD = float(os.environ.get('YOLO_CONF', '0.25'))
+NMS_IOU        = float(os.environ.get('YOLO_IOU',  '0.45'))
+INPUT_SIZE     = 640
 
-_model = None
+_session     = None
+_class_names = None
 _disabled_reason = None
 
 
 def _load_model():
-    global _model, _disabled_reason
-    if not os.path.exists(MODEL_PATH):
-        _disabled_reason = f'Model not found at {MODEL_PATH} — using OpenCV fallback'
+    global _session, _class_names, _disabled_reason
+    if not os.path.exists(ONNX_PATH):
+        _disabled_reason = (f'ONNX model not found at {ONNX_PATH} — '
+                            'export it on the laptop first, then git pull on the Pi')
         return
     try:
-        from ultralytics import YOLO
-        _model = YOLO(MODEL_PATH)
-        _model.overrides['verbose'] = False
-        print(f'[ai_triage] YOLO model loaded — classes: {list(_model.names.values())}')
+        import onnxruntime as ort
+        _session = ort.InferenceSession(ONNX_PATH,
+                                        providers=['CPUExecutionProvider'])
+        meta = _session.get_modelmeta().custom_metadata_map
+        raw  = meta.get('names', '{0: "defect"}')
+        try:
+            _class_names = ast.literal_eval(raw)
+        except Exception:
+            _class_names = {0: 'defect'}
+        print(f'[ai_triage] ONNX model loaded — classes: {list(_class_names.values())}')
+    except ImportError:
+        _disabled_reason = 'onnxruntime not installed — run: pip install onnxruntime'
+        print(f'[ai_triage] {_disabled_reason}')
     except Exception as e:
-        _disabled_reason = f'Failed to load YOLO model: {e}'
+        _disabled_reason = f'Failed to load ONNX model: {e}'
         print(f'[ai_triage] {_disabled_reason}')
 
 
@@ -43,7 +56,7 @@ _load_model()
 
 
 def is_enabled():
-    return _model is not None
+    return _session is not None
 
 
 def disabled_reason():
@@ -55,20 +68,55 @@ def detect_defects(frame):
     Run defect detection on a single BGR frame.
     Returns [{"label": str, "confidence": float, "bbox": (x1, y1, x2, y2)}]
     """
-    if _model is None:
+    if _session is None:
         return _opencv_fallback(frame)
     try:
-        results = _model(frame, conf=CONF_THRESHOLD, verbose=False)[0]
+        orig_h, orig_w = frame.shape[:2]
+
+        # Preprocess: resize → RGB → normalise → BCHW
+        blob = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE))
+        blob = blob[:, :, ::-1].astype(np.float32) / 255.0
+        blob = blob.transpose(2, 0, 1)[np.newaxis]
+
+        # Inference
+        input_name = _session.get_inputs()[0].name
+        raw = _session.run(None, {input_name: blob})[0]   # (1, nc+4, 8400)
+
+        # Parse YOLOv8 output: transpose to (8400, nc+4)
+        preds       = raw[0].T
+        boxes_xywh  = preds[:, :4]
+        class_scores = preds[:, 4:]
+        class_ids   = class_scores.argmax(axis=1)
+        confidences = class_scores.max(axis=1)
+
+        mask = confidences >= CONF_THRESHOLD
+        if not mask.any():
+            return []
+
+        boxes_xywh  = boxes_xywh[mask]
+        confidences = confidences[mask]
+        class_ids   = class_ids[mask]
+
+        # Scale from 640-space to original image space
+        sx, sy = orig_w / INPUT_SIZE, orig_h / INPUT_SIZE
+        x1 = (boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2) * sx
+        y1 = (boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2) * sy
+        bw =  boxes_xywh[:, 2] * sx
+        bh =  boxes_xywh[:, 3] * sy
+
+        nms_boxes = [[float(x), float(y), float(w), float(h)]
+                     for x, y, w, h in zip(x1, y1, bw, bh)]
+        indices = cv2.dnn.NMSBoxes(nms_boxes, confidences.tolist(),
+                                   CONF_THRESHOLD, NMS_IOU)
+
         detections = []
-        for box in results.boxes:
-            cls_id = int(box.cls[0])
-            label  = _model.names[cls_id]
-            conf   = float(box.conf[0])
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
+        for i in (indices.flatten() if len(indices) else []):
+            x, y, w, h = nms_boxes[i]
+            label = _class_names.get(int(class_ids[i]), str(int(class_ids[i])))
             detections.append({
                 'label':      label,
-                'confidence': round(conf, 3),
-                'bbox':       (x1, y1, x2, y2),
+                'confidence': round(float(confidences[i]), 3),
+                'bbox':       (int(x), int(y), int(x + w), int(y + h)),
             })
         return detections
     except Exception as e:
@@ -91,7 +139,7 @@ def annotate_frame(frame, detections):
     return annotated
 
 
-# ── OpenCV fallback (no model file / no ultralytics) ─────────────────────────
+# ── OpenCV fallback (no ONNX file / no onnxruntime) ──────────────────────────
 
 CRACK_MIN_AREA     = int(os.environ.get('CRACK_MIN_AREA',     '200'))
 CRACK_ASPECT_RATIO = float(os.environ.get('CRACK_ASPECT_RATIO', '3.5'))
@@ -107,7 +155,8 @@ def _opencv_fallback(frame):
     edges    = cv2.Canny(blurred, CRACK_CANNY_LOW, CRACK_CANNY_HIGH)
     kernel   = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     dilated  = cv2.dilate(edges, kernel, iterations=2)
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
     detections = []
     for cnt in contours:
         if cv2.contourArea(cnt) < CRACK_MIN_AREA:
