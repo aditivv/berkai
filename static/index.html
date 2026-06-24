@@ -528,7 +528,7 @@
     // Returns 0 (intake) → 1 (outflow).
     function _bboxDepth(bbox) {
       const area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
-      const maxArea = 640 * 480 * 0.30; // ~30% of frame = very close
+      const maxArea = 640 * 480 * 0.10; // ~30% of frame = very close
       return 1 - Math.min(1, Math.max(0, area / maxArea));
     }
 
