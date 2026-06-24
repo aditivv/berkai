@@ -199,8 +199,8 @@ static const imx708_reg_t imx708_mode_2x2bin[] = {
     {0x0225, 0xF4},
     {0x3116, 0x01},
     {0x3117, 0xF4},
-    {0x0204, 0x00},   /* analogue gain high */
-    {0x0205, 0x70},   /* analogue gain low  */
+    {0x0204, 0x03},   /* analogue gain high — 8x: code 0x0380, gain=1024/(1024-896) */
+    {0x0205, 0x80},   /* analogue gain low                                           */
     {0x0216, 0x00},
     {0x0217, 0x70},
     {0x0218, 0x01},
