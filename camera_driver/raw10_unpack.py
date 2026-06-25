@@ -50,14 +50,23 @@ px[:, 3::4] = (b3 << 2) | ((b4 >> 6) & 0x3)   # values now 0..1023
 # 16-bit Bayer for ffmpeg debayering.
 px.astype("<u2").tofile(inp + ".bayer16")
 
-# Brightness-normalized 8-bit grayscale PGM for an instant look.
+# Contrast-stretched 8-bit grayscale PGM for an instant look.
+# Stretch the 1st..99.5th percentile to 0..255 (ignores hot pixels / black
+# offset), then apply gamma 0.5 to lift the shadows — so even a dark scene is
+# clearly visible without re-capturing.
 peak = int(px.max())
-norm = (px.astype(np.float32) / max(1, peak) * 255.0).astype(np.uint8)
+lo = float(np.percentile(px, 1.0))
+hi = float(np.percentile(px, 99.5))
+if hi <= lo:
+    hi = lo + 1.0
+stretched = np.clip((px.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
+norm = ((stretched ** 0.5) * 255.0).astype(np.uint8)   # gamma 0.5 brighten
 with open(inp + ".pgm", "wb") as f:
     f.write(b"P5\n%d %d\n255\n" % (W, H))
     norm.tofile(f)
 
-print("max 10-bit value = %d (%.0f%% of full scale)" % (peak, 100.0 * peak / 1023))
+print("max=%d  median=%d  p99.5=%d  (%.0f%% of full scale at p99.5)"
+      % (peak, int(np.median(px)), int(hi), 100.0 * hi / 1023))
 print("wrote %s.pgm  (grayscale, normalized — view this first)" % inp)
 print("wrote %s.bayer16  (for color via ffmpeg)" % inp)
 print("color: ffmpeg -f rawvideo -pixel_format bayer_rggb16le "
