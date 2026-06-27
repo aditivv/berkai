@@ -1,9 +1,8 @@
 """
-AI triage — ONNX-based YOLO pipe defect detection.
+AI triage — ONNX-based YOLO pipe defect segmentation.
 
 Uses onnxruntime (tiny footprint) instead of PyTorch/ultralytics on the Pi.
-Requires: runs/detect/train-2/weights/best.onnx  (export on laptop with:
-    python -c "from ultralytics import YOLO; YOLO('runs/detect/train-2/weights/best.pt').export(format='onnx', imgsz=640, simplify=True)"
+Requires: runs/segment/pipedown_crack_seg/weights/best.onnx
 Falls back to OpenCV edge detection if the ONNX file or onnxruntime is missing.
 
 Tunable via environment variables:
@@ -17,7 +16,7 @@ import cv2
 import numpy as np
 
 ONNX_PATH = os.path.join(os.path.dirname(__file__),
-                         'runs', 'detect', 'train-2', 'weights', 'best.onnx')
+                         'runs', 'segment', 'pipedown_crack_seg', 'weights', 'best.onnx')
 CONF_THRESHOLD = float(os.environ.get('YOLO_CONF', '0.25'))
 NMS_IOU        = float(os.environ.get('YOLO_IOU',  '0.45'))
 INPUT_SIZE     = 640
@@ -80,14 +79,19 @@ def detect_defects(frame):
 
         # Inference
         input_name = _session.get_inputs()[0].name
-        raw = _session.run(None, {input_name: blob})[0]   # (1, nc+4, 8400)
+        raw = _session.run(None, {input_name: blob})
+        # Seg model: raw[0]=(1,4+nc+32,8400), raw[1]=(1,32,160,160) protos
+        # Det model: raw[0]=(1,4+nc,8400)
+        # We only need raw[0]; ignore protos and mask coefficients
+        pred_tensor = raw[0]
+        preds = pred_tensor[0].T  # (8400, 4+nc[+32])
 
-        # Parse YOLOv8 output: transpose to (8400, nc+4)
-        preds       = raw[0].T
-        boxes_xywh  = preds[:, :4]
-        class_scores = preds[:, 4:]
-        class_ids   = class_scores.argmax(axis=1)
-        confidences = class_scores.max(axis=1)
+        n_extra = 32 if len(raw) == 2 else 0
+        nc = preds.shape[1] - 4 - n_extra
+        boxes_xywh   = preds[:, :4]
+        class_scores = preds[:, 4:4 + nc]
+        class_ids    = class_scores.argmax(axis=1)
+        confidences  = class_scores.max(axis=1)
 
         mask = confidences >= CONF_THRESHOLD
         if not mask.any():

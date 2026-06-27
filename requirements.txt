@@ -8,5 +8,5 @@ opencv-python>=4.5
 
 # YOLO inference — onnxruntime is ~25 MB vs PyTorch's ~600 MB
 # ultralytics is only needed on the laptop to export best.pt → best.onnx:
-#   python -c "from ultralytics import YOLO; YOLO('runs/detect/train-2/weights/best.pt').export(format='onnx', imgsz=640, simplify=True)"
+#   python -c "from ultralytics import YOLO; YOLO('runs/segment/pipedown_crack_seg/weights/best.pt').export(format='onnx', imgsz=640, simplify=True)"
 onnxruntime>=1.17
