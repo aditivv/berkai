@@ -12,6 +12,7 @@ Tunable via environment variables:
 
 import os
 import ast
+import threading
 import cv2
 import numpy as np
 
@@ -51,7 +52,7 @@ def _load_model():
         print(f'[ai_triage] {_disabled_reason}')
 
 
-_load_model()
+threading.Thread(target=_load_model, daemon=True).start()
 
 
 def is_enabled():
