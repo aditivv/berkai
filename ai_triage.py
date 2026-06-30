@@ -20,7 +20,7 @@ ONNX_PATH = os.path.join(os.path.dirname(__file__),
                          'runs', 'segment', 'pipedown_crack_seg', 'weights', 'best.onnx')
 CONF_THRESHOLD = float(os.environ.get('YOLO_CONF', '0.25'))
 NMS_IOU        = float(os.environ.get('YOLO_IOU',  '0.45'))
-INPUT_SIZE     = 320
+INPUT_SIZE     = 640
 
 _session     = None
 _class_names = None
