@@ -43,6 +43,7 @@ from imx708_stream import (
     resize_image,
     save_jpeg,
     unpack_raw10,
+    unpack_raw10_fast8,
 )
 
 
@@ -76,9 +77,12 @@ def bench_config(cam: Imx708Stream, cfg: StreamConfig, frames: int,
         raw = cam.read_raw_frame()
         t1 = time.perf_counter()
         buf = np.frombuffer(raw, dtype=np.uint8)
-        px16 = unpack_raw10(buf, cfg.width, cfg.height)
+        if cfg.unpack == "fast8":
+            bayer = unpack_raw10_fast8(buf, cfg.width, cfg.height)
+        else:
+            bayer = unpack_raw10(buf, cfg.width, cfg.height)
         t2 = time.perf_counter()
-        img = debayer(px16, cfg)
+        img = debayer(bayer, cfg)
         if cfg.resize is not None:
             img = resize_image(img, cfg.resize)
         t3 = time.perf_counter()
