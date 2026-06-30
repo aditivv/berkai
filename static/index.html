@@ -555,11 +555,16 @@
         return;
       }
 
+      const _severityColor = label => {
+        if (['Rupture','Disconnect'].includes(label))       return '#ef4444';
+        if (['Deformation','Misalignment'].includes(label)) return '#f97316';
+        return '#eab308';
+      };
       detections.forEach(det => {
         const [x1, y1, x2, y2] = det.bbox;
         const svgX = X0 + _bboxDepth(det.bbox) * W;            // depth → pipe position
         const svgY = Y0 + ((y1 + y2) / 2 / CAM_H) * H;        // camera y → pipe top/bottom
-        const color = det.confidence > 0.7 ? '#ef4444' : '#f97316';
+        const color = _severityColor(det.label);
         const r = Math.max(6, Math.min(18, 6 + det.confidence * 14));
 
         g.appendChild(mk('circle', { cx: svgX, cy: svgY, r: r + 8, fill: `${color}14` }));
@@ -569,8 +574,12 @@
           stroke: color, 'stroke-width': 1, 'stroke-dasharray': '3,2' }));
         const lbl = mk('text', { x: svgX, y: Y0 + H + 22,
           'text-anchor': 'middle', fill: color, 'font-size': 11 });
-        lbl.textContent = `${Math.round(det.confidence * 100)}%`;
+        lbl.textContent = det.label;
         g.appendChild(lbl);
+        const conf = mk('text', { x: svgX, y: Y0 + H + 34,
+          'text-anchor': 'middle', fill: color, 'font-size': 10, opacity: 0.8 });
+        conf.textContent = `${Math.round(det.confidence * 100)}%`;
+        g.appendChild(conf);
       });
     }
 
@@ -580,12 +589,17 @@
         list.innerHTML = '<p style="color:#4caf50;font-size:13px;margin:0;padding:4px 0">No active defects detected</p>';
         return;
       }
+      const severityColor = label => {
+        if (['Rupture','Disconnect'].includes(label))       return '#ef4444';
+        if (['Deformation','Misalignment'].includes(label)) return '#f97316';
+        return '#eab308';
+      };
       list.innerHTML = detections.map((d, i) => {
-        const color = d.confidence > 0.7 ? '#ef4444' : '#f97316';
+        const color = severityColor(d.label);
         const depth = _bboxDepth(d.bbox);
         const pos = depth < 0.33 ? 'Near intake' : depth < 0.66 ? 'Mid-section' : 'Near outflow';
         return `<div class="detect-item" style="border-color:${color}">
-          <div class="detect-label" style="color:${color}">CRACK #${i + 1}</div>
+          <div class="detect-label" style="color:${color}">${d.label}</div>
           <div class="detect-sub">Confidence: ${Math.round(d.confidence * 100)}% &nbsp;·&nbsp; ${pos}</div>
         </div>`;
       }).join('');

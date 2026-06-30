@@ -38,11 +38,14 @@ def _load_model():
         _session = ort.InferenceSession(ONNX_PATH,
                                         providers=['CPUExecutionProvider'])
         meta = _session.get_modelmeta().custom_metadata_map
-        raw  = meta.get('names', '{0: "defect"}')
+        raw  = meta.get('names', '')
         try:
             _class_names = ast.literal_eval(raw)
         except Exception:
-            _class_names = {0: 'defect'}
+            _class_names = {
+                0: 'Deformation', 1: 'Obstacle', 2: 'Rupture',
+                3: 'Disconnect',  4: 'Misalignment', 5: 'Deposition',
+            }
         print(f'[ai_triage] ONNX model loaded — classes: {list(_class_names.values())}')
     except ImportError:
         _disabled_reason = 'onnxruntime not installed — run: pip install onnxruntime'
