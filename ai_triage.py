@@ -20,7 +20,7 @@ ONNX_PATH = os.path.join(os.path.dirname(__file__),
                          'runs', 'segment', 'pipedown_crack_seg', 'weights', 'best.onnx')
 CONF_THRESHOLD = float(os.environ.get('YOLO_CONF', '0.25'))
 NMS_IOU        = float(os.environ.get('YOLO_IOU',  '0.45'))
-INPUT_SIZE     = 640
+INPUT_SIZE     = 320
 
 _session     = None
 _class_names = None
@@ -35,7 +35,11 @@ def _load_model():
         return
     try:
         import onnxruntime as ort
-        _session = ort.InferenceSession(ONNX_PATH,
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 4
+        opts.inter_op_num_threads = 1
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _session = ort.InferenceSession(ONNX_PATH, sess_options=opts,
                                         providers=['CPUExecutionProvider'])
         meta = _session.get_modelmeta().custom_metadata_map
         raw  = meta.get('names', '')
