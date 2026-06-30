@@ -262,6 +262,28 @@ def _write_pnm(path: str, img: np.ndarray) -> None:
         np.ascontiguousarray(img).tofile(f)
 
 
+def encode_jpeg_bytes(img: np.ndarray, quality: int = 90) -> bytes:
+    """Encode an 8-bit RGB/gray array to JPEG *bytes* in memory (for streaming).
+
+    Needs an in-memory encoder (cv2 or PIL); the ffmpeg-to-file fallback used by
+    save_jpeg is too slow for a per-frame stream, so this raises if neither is
+    present rather than silently stalling the feed.
+    """
+    if _HAVE_CV2:
+        a = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.ndim == 3 else img
+        ok, enc = cv2.imencode(".jpg", a, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if not ok:
+            raise RuntimeError("cv2.imencode failed")
+        return enc.tobytes()
+    if _HAVE_PIL:
+        import io
+        bio = io.BytesIO()
+        mode = "RGB" if img.ndim == 3 else "L"
+        Image.fromarray(img, mode).save(bio, "JPEG", quality=quality)
+        return bio.getvalue()
+    raise RuntimeError("no in-memory JPEG encoder (cv2/PIL) — MJPEG stream needs one")
+
+
 def save_jpeg(path: str, img: np.ndarray, quality: int) -> None:
     """Save an 8-bit RGB (HxWx3) or gray (HxW) array as JPEG, no hard cv2 dep."""
     if _HAVE_CV2:
