@@ -118,6 +118,7 @@ class StreamConfig:
     color: str = "rgb"           # rgb | gray
     tonemap: str = "stretch"     # stretch (percentile+gamma) | shift (>>2)
     gamma: float = 0.5           # only used by the "stretch" tonemap
+    unpack: str = "full"         # full (10-bit uint16) | fast8 (8-bit MSB, ==shift)
     debayer: str = "auto"        # auto | cv2 | bin
     resize: Optional[tuple[int, int]] = None  # (w, h) or None
     jpeg_quality: int = 90
@@ -151,6 +152,24 @@ def unpack_raw10(buf: np.ndarray, width: int, height: int) -> np.ndarray:
     px[:, 2::4] = (b2 << 2) | ((b4 >> 4) & 0x3)
     px[:, 3::4] = (b3 << 2) | ((b4 >> 6) & 0x3)
     return px
+
+
+def unpack_raw10_fast8(buf: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Fast path: keep the 4 MSB bytes of each 5-byte group, drop the LSB byte.
+
+    Yields an 8-bit (uint8) Bayer array directly. This is bit-identical to
+    (unpack_raw10() >> 2): both keep exactly the high 8 bits of each pixel, so
+    for 8-bit output (JPEG / model input) it is *exact*, not an approximation —
+    the discarded 2 LSBs/pixel are below the sensor noise floor. It avoids the
+    four masked-shift passes over ~3M pixels, so it is several times faster than
+    the full 10-bit unpack (the dominant cost measured in bench_stream.py).
+    """
+    stride = width * BITS // 8
+    need = height * stride
+    if buf.size < need:
+        raise ValueError(f"frame too small: have {buf.size} bytes, need {need}")
+    groups = buf[:need].reshape(height, width // 4, 5)
+    return np.ascontiguousarray(groups[:, :, :4]).reshape(height, width)
 
 
 # ── 10-bit -> 8-bit tone mapping ────────────────────────────────────────────────
@@ -190,21 +209,28 @@ def debayer_numpy(px16: np.ndarray, bayer: str, color: str) -> np.ndarray:
     return np.dstack((r, g, b)).astype(np.uint16)  # RGB order
 
 
-def debayer(px16: np.ndarray, cfg: StreamConfig) -> np.ndarray:
-    """Bayer (uint16) -> 8-bit image (HxWx3 RGB or HxW gray) per config."""
+def debayer(arr: np.ndarray, cfg: StreamConfig) -> np.ndarray:
+    """Bayer array -> 8-bit image (HxWx3 RGB or HxW gray) per config.
+
+    Accepts either a 10-bit uint16 Bayer array (from unpack_raw10, tone-mapped
+    down to 8-bit here) or an 8-bit uint8 Bayer array (from unpack_raw10_fast8,
+    already at the final bit depth — tonemap is skipped).
+    """
+    is8 = arr.dtype == np.uint8
     use_cv2 = cfg.debayer == "cv2" or (cfg.debayer == "auto" and _HAVE_CV2)
     if use_cv2:
         if not _HAVE_CV2:
             raise RuntimeError("debayer=cv2 requested but cv2 is not importable")
         code_bgr, code_gray = _cv2_codes(cfg.bayer)
-        bayer8 = to_8bit(px16, cfg.tonemap, cfg.gamma)
+        bayer8 = arr if is8 else to_8bit(arr, cfg.tonemap, cfg.gamma)
         if cfg.color == "gray":
             return cv2.cvtColor(bayer8, code_gray)
         bgr = cv2.cvtColor(bayer8, code_bgr)
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)  # normalise to RGB
-    # numpy fallback: demosaic in 10-bit, then tone-map.
-    img16 = debayer_numpy(px16, cfg.bayer, cfg.color)
-    return to_8bit(img16, cfg.tonemap, cfg.gamma)
+    # numpy fallback: 2x2-bin demosaic. For fast8 the channels are already 8-bit
+    # (0..255), so just cast; for the 10-bit path, tone-map down.
+    img = debayer_numpy(arr, cfg.bayer, cfg.color)
+    return img.astype(np.uint8) if is8 else to_8bit(img, cfg.tonemap, cfg.gamma)
 
 
 # ── Resize (optional, cv2 -> PIL -> nearest-neighbour numpy) ─────────────────────
@@ -305,8 +331,11 @@ class Imx708Stream:
         """Read + unpack + debayer + tonemap (+resize) -> one 8-bit frame."""
         raw = self.read_raw_frame()
         buf = np.frombuffer(raw, dtype=np.uint8)
-        px16 = unpack_raw10(buf, self.cfg.width, self.cfg.height)
-        img = debayer(px16, self.cfg)
+        if self.cfg.unpack == "fast8":
+            bayer = unpack_raw10_fast8(buf, self.cfg.width, self.cfg.height)
+        else:
+            bayer = unpack_raw10(buf, self.cfg.width, self.cfg.height)
+        img = debayer(bayer, self.cfg)
         if self.cfg.resize is not None:
             img = resize_image(img, self.cfg.resize)
         return img
@@ -376,6 +405,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tonemap", choices=["stretch", "shift"], default="stretch",
                    help="10->8 bit: stretch=percentile+gamma (good for dim scenes), shift=>>2")
     p.add_argument("--gamma", type=float, default=0.5, help="gamma for --tonemap stretch")
+    p.add_argument("--unpack", choices=["full", "fast8"], default="full",
+                   help="full=10-bit unpack; fast8=8-bit MSB (== shift, several x faster)")
     p.add_argument("--debayer", choices=["auto", "cv2", "bin"], default="auto",
                    help="auto uses cv2 if present, else numpy 2x2-bin (half-res)")
     p.add_argument("--resize", default=None, help="resize output, e.g. 640x640")
@@ -392,7 +423,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = StreamConfig(
         device=args.device, width=args.width, height=args.height,
         bayer=args.bayer, color=args.color, tonemap=args.tonemap, gamma=args.gamma,
-        debayer=args.debayer, resize=_parse_resize(args.resize),
+        unpack=args.unpack, debayer=args.debayer, resize=_parse_resize(args.resize),
         jpeg_quality=args.jpeg_quality,
     )
     try:

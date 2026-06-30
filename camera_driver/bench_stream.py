@@ -94,7 +94,9 @@ def bench_config(cam: Imx708Stream, cfg: StreamConfig, frames: int,
 
 def label(cfg: StreamConfig) -> str:
     r = "x".join(map(str, cfg.resize)) if cfg.resize else "full"
-    return f"{cfg.debayer:3} {cfg.color:4} {cfg.tonemap:7} {r}"
+    # fast8 ignores tonemap (data already 8-bit), so show "-" there.
+    tone = "-" if cfg.unpack == "fast8" else cfg.tonemap
+    return f"{cfg.unpack:5} {cfg.debayer:3} {cfg.color:4} {tone:7} {r}"
 
 
 def build_sweep(base: StreamConfig, only: Optional[str]) -> list[StreamConfig]:
@@ -102,12 +104,15 @@ def build_sweep(base: StreamConfig, only: Optional[str]) -> list[StreamConfig]:
     debayers = ["cv2", "bin"] if S._HAVE_CV2 else ["bin"]
     if only in ("cv2", "bin"):
         debayers = [only]
-    for db in debayers:
-        for color in ("rgb", "gray"):
-            for tone in ("stretch", "shift"):
-                for resize in (None, (640, 640)):
-                    cfgs.append(replace(base, debayer=db, color=color,
-                                        tonemap=tone, resize=resize))
+    for unpack in ("full", "fast8"):
+        for db in debayers:
+            for color in ("rgb", "gray"):
+                # fast8 has no tonemap step; full sweeps both.
+                tones = ("shift",) if unpack == "fast8" else ("stretch", "shift")
+                for tone in tones:
+                    for resize in (None, (640, 640)):
+                        cfgs.append(replace(base, unpack=unpack, debayer=db,
+                                            color=color, tonemap=tone, resize=resize))
     return cfgs
 
 
@@ -124,7 +129,7 @@ def main() -> int:
 
     base = StreamConfig(device=args.device)
     if args.quick:
-        sweep = [replace(base, debayer="bin", color="gray",
+        sweep = [replace(base, unpack="fast8", debayer="bin", color="gray",
                          tonemap="shift", resize=(640, 640))]
     else:
         sweep = build_sweep(base, args.only)
@@ -132,7 +137,7 @@ def main() -> int:
     print(f"cv2={S._HAVE_CV2}  PIL={S._HAVE_PIL}  "
           f"encoder={'cv2' if S._HAVE_CV2 else 'PIL' if S._HAVE_PIL else 'ffmpeg'}")
     print(f"timing {args.frames} frames/config (+{args.warmup} warmup)\n")
-    header = f"{'config':24} {'fps':>6}  {'total':>7}  phases (ms, median)"
+    header = f"{'config':30} {'fps':>6}  {'total':>7}  phases (ms, median)"
     print(header)
     print("-" * len(header))
 
@@ -145,7 +150,7 @@ def main() -> int:
                       f"unpack {statistics.median(pt.unpack):5.1f} | "
                       f"debayer {statistics.median(pt.debayer):5.1f} | "
                       f"encode {statistics.median(pt.encode):5.1f}")
-            print(f"{label(cfg):24} {fps:6.1f}  {total:6.1f}   {phases}")
+            print(f"{label(cfg):30} {fps:6.1f}  {total:6.1f}   {phases}")
 
     print("\nread = wait-for-fresh-frame + 3.7MB copy (small when processing-bound,")
     print("       ~frame-interval when capture-bound). tonemap cost = stretch - shift")
