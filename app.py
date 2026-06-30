@@ -55,8 +55,6 @@ def logout():
     return redirect(url_for('login'))
 
 # ── AI triage state ─────────────────────────────────────────────────────────
-# Latest detections are cached here so /api/detections can report them
-# without re-running inference; _generate_frames() updates this as it goes.
 
 _latest_detections = []
 _detections_lock = threading.Lock()
@@ -77,29 +75,47 @@ except ImportError:
     _VideoCapture = cv2.VideoCapture
 
 _camera = None
+_latest_frame = None
+_frame_lock = threading.Lock()
+_STREAM_INFER_INTERVAL = 1.0  # seconds between inference passes on the stream
 
 def _get_camera():
     global _camera
-    # list all cameras available
-    
     if _camera is None or not _camera.isOpened():
         _camera = _VideoCapture(0)
     return _camera
 
-def _generate_frames():
-    global _latest_detections
+def _capture_and_infer():
+    """Background thread: capture frames at full speed, run inference every second."""
+    global _latest_frame, _latest_detections
     cam = _get_camera()
+    last_infer = 0
     while True:
         ok, frame = cam.read()
         if not ok:
-            break
+            time.sleep(0.05)
+            continue
+        with _frame_lock:
+            _latest_frame = frame
+        now = time.time()
+        if now - last_infer >= _STREAM_INFER_INTERVAL:
+            detections = detect_defects(frame)
+            with _detections_lock:
+                _latest_detections = detections
+            last_infer = now
 
-        detections = detect_defects(frame)
+def _generate_frames():
+    """Stream thread: encode and send latest frame as fast as possible."""
+    while True:
+        with _frame_lock:
+            frame = _latest_frame
+        if frame is None:
+            time.sleep(0.01)
+            continue
         with _detections_lock:
-            _latest_detections = detections
-        frame = annotate_frame(frame, detections)
-
-        _, buf = cv2.imencode('.jpg', frame)
+            detections = list(_latest_detections)
+        annotated = annotate_frame(frame, detections)
+        _, buf = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
 
@@ -222,6 +238,7 @@ def _run_triage_updates():
 
 if __name__ == '__main__':
     start_sensor_thread()
+    threading.Thread(target=_capture_and_infer, daemon=True).start()
     threading.Thread(target=_run_triage_updates, daemon=True).start()
     threading.Thread(target=_monitor_anomalies, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
