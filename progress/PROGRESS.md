@@ -837,3 +837,16 @@ paths; hub JPEG broadcast + annotate hook + status card; full app end-to-end
 via Flask test client (3 multipart frames from `/video_feed`, `/api/detections`
 200 with ONNX model loaded). **Not yet run on the Pi** — needs file sync +
 `./start.sh`.
+
+**Addendum (same day): cv2.dnn inference backend for the Pi.**
+`pip install onnxruntime` fails on the Pi — onnxruntime publishes no QNX
+wheels (`No matching distribution found`). Fix: `ai_triage.py` now tries
+onnxruntime first, then falls back to `cv2.dnn.readNetFromONNX` (cv2 IS on
+the Pi). Verified on Windows against the actual model
+(`runs/segment/pipedown_crack_seg/weights/best.onnx`, det head 1x10x8400 =
+4 box + 6 classes): cv2.dnn output matches onnxruntime to max abs diff
+1.6e-3, and `detect_defects()` returns identical detections through both
+backends. cv2.dnn can't read ONNX metadata, so the class-name dict is
+hardcoded (verified identical to the model's embedded names). Inference is
+~96 ms on the laptop; fine on the Pi since triage runs every 2 s off-stream.
+Do NOT pip-install anything for this on the Pi — just sync ai_triage.py.

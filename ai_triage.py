@@ -1,9 +1,13 @@
 """
 AI triage — ONNX-based YOLO pipe defect segmentation.
 
-Uses onnxruntime (tiny footprint) instead of PyTorch/ultralytics on the Pi.
+Runs the ONNX model with the first available backend:
+  1. onnxruntime  (laptop / anywhere pip can install it)
+  2. cv2.dnn      (the QNX Pi: onnxruntime has no QNX wheels, but cv2 is
+                   present — verified numerically equivalent to onnxruntime
+                   on this model, max abs diff ~1.6e-3)
 Requires: runs/segment/pipedown_crack_seg/weights/best.onnx
-Falls back to OpenCV edge detection if the ONNX file or onnxruntime is missing.
+Falls back to OpenCV edge detection if the ONNX file or both backends are missing.
 
 Tunable via environment variables:
   YOLO_CONF          confidence threshold (default 0.25)
@@ -22,13 +26,22 @@ CONF_THRESHOLD = float(os.environ.get('YOLO_CONF', '0.25'))
 NMS_IOU        = float(os.environ.get('YOLO_IOU',  '0.45'))
 INPUT_SIZE     = 640
 
-_session     = None
+_session     = None   # onnxruntime backend
+_net         = None   # cv2.dnn backend (QNX Pi)
+_net_lock    = threading.Lock()  # cv2.dnn setInput/forward is stateful
 _class_names = None
 _disabled_reason = None
 
+# cv2.dnn can't read ONNX custom metadata, and also the safety net when
+# onnxruntime metadata is missing/corrupt.
+_FALLBACK_CLASS_NAMES = {
+    0: 'Deformation', 1: 'Obstacle', 2: 'Rupture',
+    3: 'Disconnect',  4: 'Misalignment', 5: 'Deposition',
+}
+
 
 def _load_model():
-    global _session, _class_names, _disabled_reason
+    global _session, _net, _class_names, _disabled_reason
     if not os.path.exists(ONNX_PATH):
         _disabled_reason = (f'ONNX model not found at {ONNX_PATH} — '
                             'export it on the laptop first, then git pull on the Pi')
@@ -46,16 +59,23 @@ def _load_model():
         try:
             _class_names = ast.literal_eval(raw)
         except Exception:
-            _class_names = {
-                0: 'Deformation', 1: 'Obstacle', 2: 'Rupture',
-                3: 'Disconnect',  4: 'Misalignment', 5: 'Deposition',
-            }
-        print(f'[ai_triage] ONNX model loaded — classes: {list(_class_names.values())}')
+            _class_names = _FALLBACK_CLASS_NAMES
+        print(f'[ai_triage] ONNX model loaded (onnxruntime) — classes: {list(_class_names.values())}')
+        return
     except ImportError:
-        _disabled_reason = 'onnxruntime not installed — run: pip install onnxruntime'
-        print(f'[ai_triage] {_disabled_reason}')
+        print('[ai_triage] onnxruntime not installed — trying cv2.dnn backend')
     except Exception as e:
         _disabled_reason = f'Failed to load ONNX model: {e}'
+        print(f'[ai_triage] {_disabled_reason}')
+        return
+    # cv2.dnn fallback — the path taken on the QNX Pi (no onnxruntime wheels).
+    try:
+        _net = cv2.dnn.readNetFromONNX(ONNX_PATH)
+        _class_names = _FALLBACK_CLASS_NAMES
+        print(f'[ai_triage] ONNX model loaded (cv2.dnn) — classes: {list(_class_names.values())}')
+    except Exception as e:
+        _disabled_reason = (f'no ONNX backend: onnxruntime not installed and '
+                            f'cv2.dnn failed to load the model: {e}')
         print(f'[ai_triage] {_disabled_reason}')
 
 
@@ -63,7 +83,7 @@ threading.Thread(target=_load_model, daemon=True).start()
 
 
 def is_enabled():
-    return _session is not None
+    return _session is not None or _net is not None
 
 
 def disabled_reason():
@@ -75,7 +95,7 @@ def detect_defects(frame):
     Run defect detection on a single BGR frame.
     Returns [{"label": str, "confidence": float, "bbox": (x1, y1, x2, y2)}]
     """
-    if _session is None:
+    if _session is None and _net is None:
         return _opencv_fallback(frame)
     try:
         orig_h, orig_w = frame.shape[:2]
@@ -85,9 +105,14 @@ def detect_defects(frame):
         blob = blob[:, :, ::-1].astype(np.float32) / 255.0
         blob = blob.transpose(2, 0, 1)[np.newaxis]
 
-        # Inference
-        input_name = _session.get_inputs()[0].name
-        raw = _session.run(None, {input_name: blob})
+        # Inference (onnxruntime if present, else cv2.dnn)
+        if _session is not None:
+            input_name = _session.get_inputs()[0].name
+            raw = _session.run(None, {input_name: blob})
+        else:
+            with _net_lock:
+                _net.setInput(blob)
+                raw = list(_net.forward(_net.getUnconnectedOutLayersNames()))
         # Seg model: raw[0]=(1,4+nc+32,8400), raw[1]=(1,32,160,160) protos
         # Det model: raw[0]=(1,4+nc,8400)
         # We only need raw[0]; ignore protos and mask coefficients
