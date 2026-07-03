@@ -55,8 +55,6 @@ def logout():
     return redirect(url_for('login'))
 
 # ── AI triage state ─────────────────────────────────────────────────────────
-# Latest detections are cached here so /api/detections can report them
-# without re-running inference; _generate_frames() updates this as it goes.
 
 _latest_detections = []
 _detections_lock = threading.Lock()
@@ -77,31 +75,61 @@ except ImportError:
     _VideoCapture = cv2.VideoCapture
 
 _camera = None
+_latest_frame = None
+_frame_lock = threading.Lock()
+_STREAM_INFER_INTERVAL = 2.0  # seconds between inference passes
+_STREAM_FPS = 20              # target stream FPS
 
 def _get_camera():
     global _camera
-    # list all cameras available
-    
     if _camera is None or not _camera.isOpened():
         _camera = _VideoCapture(0)
     return _camera
 
-def _generate_frames():
-    global _latest_detections
+def _capture_loop():
+    """Thread 1: read frames from camera as fast as possible."""
+    global _latest_frame
     cam = _get_camera()
     while True:
         ok, frame = cam.read()
         if not ok:
-            break
+            time.sleep(0.01)
+            continue
+        with _frame_lock:
+            _latest_frame = frame
 
+def _infer_loop():
+    """Thread 2: run inference on latest frame every _STREAM_INFER_INTERVAL seconds."""
+    global _latest_detections
+    while True:
+        time.sleep(_STREAM_INFER_INTERVAL)
+        with _frame_lock:
+            frame = _latest_frame
+        if frame is None:
+            continue
         detections = detect_defects(frame)
         with _detections_lock:
             _latest_detections = detections
-        frame = annotate_frame(frame, detections)
 
-        _, buf = cv2.imencode('.jpg', frame)
+def _generate_frames():
+    """Thread 3: encode and stream latest annotated frame at _STREAM_FPS."""
+    frame_interval = 1.0 / _STREAM_FPS
+    while True:
+        t0 = time.time()
+        with _frame_lock:
+            frame = _latest_frame
+        if frame is None:
+            time.sleep(0.01)
+            continue
+        with _detections_lock:
+            detections = list(_latest_detections)
+        annotated = annotate_frame(frame, detections)
+        _, buf = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+        elapsed = time.time() - t0
+        if elapsed < frame_interval:
+            time.sleep(frame_interval - elapsed)
 
 @app.route('/video_feed')
 def video_feed():
@@ -122,7 +150,9 @@ def detections():
 
 @app.route('/')
 def index():
-    return send_from_directory('static', 'index.html')
+    resp = send_from_directory('static', 'index.html')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 @app.route('/api/twin-state')
 def twin_state():
@@ -220,6 +250,8 @@ def _run_triage_updates():
 
 if __name__ == '__main__':
     start_sensor_thread()
+    threading.Thread(target=_capture_loop, daemon=True).start()
+    threading.Thread(target=_infer_loop, daemon=True).start()
     threading.Thread(target=_run_triage_updates, daemon=True).start()
     threading.Thread(target=_monitor_anomalies, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

@@ -13,19 +13,16 @@ lock = threading.RLock()
 # Maps segment_id -> list of detected defect label strings.
 # Empty list means no active visual defect.
 
-_DEFECT_LABELS = {'crack', 'hole', 'rupture'}
 _visual_flags = {}   # segment_id -> [label, ...]
 
 
 def set_visual_flag(segment_id, detected_labels):
     """
     Update the visual anomaly flag for a segment.
-    detected_labels: iterable of label strings from the YOLO model.
-    Only labels in _DEFECT_LABELS are recorded; others are ignored.
+    Accepts all labels — the YOLO defect model only fires on defects.
     """
-    defects = [l for l in detected_labels if l in _DEFECT_LABELS]
     with lock:
-        _visual_flags[segment_id] = defects
+        _visual_flags[segment_id] = list(detected_labels)
 
 # ── SIMULATED MODE ──────────────────────────────────────
 

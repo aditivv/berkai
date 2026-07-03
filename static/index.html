@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pipe Digital Twin</title>
-  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="/static/leaflet.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; overflow: hidden; }
@@ -62,8 +62,8 @@
     #content { flex: 1; display: flex; overflow: hidden; }
 
     /* ── Map ── */
-    #map-wrap { flex: 1; position: relative; }
-    #map { width: 100%; height: 100%; }
+    #map-wrap { flex: 1; position: relative; min-height: 0; }
+    #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #1a2035; }
 
     /* ── Legend ── */
     #legend {
@@ -223,6 +223,38 @@
       transition: opacity .3s;
     }
     #panel-hint.hidden { opacity: 0; }
+
+    /* ── Pipe segment detail overlay ── */
+    #pipe-detail {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: #13162a; display: none; flex-direction: column; z-index: 20;
+    }
+    #pipe-detail.active { display: flex; }
+    #pipe-detail-header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 10px 16px; border-bottom: 1px solid #2a2d3e; flex-shrink: 0;
+    }
+    #btn-back {
+      background: none; border: 1px solid #2a2d3e; color: #777;
+      padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+      white-space: nowrap; flex-shrink: 0;
+    }
+    #btn-back:hover { color: #ccc; border-color: #555; }
+    #detail-segment-name { font-size: 15px; font-weight: 600; color: #fff; }
+    #detail-meta { margin-left: auto; display: flex; gap: 16px; color: #888; font-size: 12px; }
+    #detail-meta b { color: #ccc; }
+    #pipe-diagram-wrap { padding: 20px 28px 8px; flex-shrink: 0; }
+    #pipe-svg { width: 100%; height: 130px; }
+    #pipe-detect-list {
+      padding: 0 24px 16px; flex: 1; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; min-height: 0;
+    }
+    .detect-item {
+      padding: 8px 12px; border-radius: 6px; background: #ffffff08;
+      border-left: 3px solid; font-size: 12px;
+    }
+    .detect-label { font-weight: 700; }
+    .detect-sub { color: #888; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -263,6 +295,44 @@
 
       <!-- Click-hint (fades when panel opens) -->
       <div id="panel-hint">Click any node to inspect</div>
+
+      <!-- Pipe segment detail view (overlays map when a node is selected) -->
+      <div id="pipe-detail">
+        <div id="pipe-detail-header">
+          <button id="btn-back" onclick="closePanel()">← Overview</button>
+          <div>
+            <div id="detail-segment-name">—</div>
+            <span id="detail-badge" style="margin-top:4px;display:inline-block;">—</span>
+          </div>
+          <div id="detail-meta">
+            <span>Temp: <b id="detail-temp-val">—</b> °C</span>
+            <span>Trend: <b id="detail-trend-val">—</b></span>
+          </div>
+        </div>
+        <div id="pipe-diagram-wrap">
+          <svg id="pipe-svg" viewBox="0 0 1000 160" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <linearGradient id="pipe-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stop-color="#4a5a7a"/>
+                <stop offset="35%"  stop-color="#3a4a6a"/>
+                <stop offset="100%" stop-color="#243050"/>
+              </linearGradient>
+              <linearGradient id="pipe-sheen" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stop-color="rgba(255,255,255,0.10)"/>
+                <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+              </linearGradient>
+            </defs>
+            <rect id="pipe-body" x="90" y="44" width="820" height="72" rx="36"
+                  fill="url(#pipe-fill)" stroke="#4a5568" stroke-width="2"/>
+            <rect x="90" y="44" width="820" height="28" rx="36"
+                  fill="url(#pipe-sheen)" pointer-events="none"/>
+            <text x="45"  y="82" text-anchor="middle" fill="#556" font-size="11" font-weight="600">INTAKE</text>
+            <text x="955" y="82" text-anchor="middle" fill="#556" font-size="11" font-weight="600">OUTFLOW</text>
+            <g id="pipe-crack-markers"></g>
+          </svg>
+        </div>
+        <div id="pipe-detect-list"></div>
+      </div>
     </div>
 
     <!-- Detail panel -->
@@ -328,7 +398,7 @@
 
   </div><!-- /content -->
 
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="/static/leaflet.js"></script>
   <script>
 
     // ── CONSTANTS ─────────────────────────────────────────────────────────────────
@@ -352,104 +422,60 @@
       [[32.872, 39.9225], [32.880, 39.920], [32.886, 39.918]],
     ];
 
-    function buildPipeGeoJSON(nodes) {
-      return {
-        type: 'FeatureCollection',
-        features: nodes.map((n, i) => ({
-          type: 'Feature',
-          properties: { id: n.id, state: n.state },
-          geometry: { type: 'LineString', coordinates: SEGMENT_PIPES[i] }
-        }))
-      };
-    }
-
     // ── SELECTED NODE ─────────────────────────────────────────────────────────────
     let selectedNodeId = null;
 
     // ── MAP INIT ──────────────────────────────────────────────────────────────────
-    const map = new maplibregl.Map({
-      container: 'map',
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: 'raster',
-            tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-            tileSize: 256,
-            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          }
-        },
-        layers: [{ id: 'osm-raster', type: 'raster', source: 'osm' }]
-      },
-      center: [32.865, 39.925],
-      zoom: 13
+    const map = L.map('map', {
+      center: [39.925, 32.865],
+      zoom: 14,
+      zoomControl: true,
+      attributionControl: false
+    });
+    L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
+
+    const _pipeLines = [];
+
+    // ── Pipe segments ────────────────────────────────────────────────────────────
+    // Glow passes first (drawn below colored lines)
+    SEGMENT_PIPES.forEach(coords => {
+      L.polyline(coords.map(([lng, lat]) => [lat, lng]),
+        { color: '#fff', weight: 14, opacity: 0.08, lineCap: 'round' }
+      ).addTo(map);
+    });
+    SEGMENT_PIPES.forEach((coords, i) => {
+      const line = L.polyline(coords.map(([lng, lat]) => [lat, lng]), {
+        color: stateColor(NODES[i].state),
+        weight: 7, lineCap: 'round', lineJoin: 'round'
+      }).addTo(map);
+      _pipeLines.push(line);
     });
 
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
-    map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
-
-    const markerEls = new Map();   // nodeId → HTMLElement
-    let mapReady = false;
-
-    map.on('load', () => {
-      mapReady = true;
-
-      // ── Pipe segments ──────────────────────────────────────────────────────────
-      map.addSource('pipes', { type: 'geojson', data: buildPipeGeoJSON(NODES) });
-
-      map.addLayer({
-        id: 'pipes-glow',
-        type: 'line',
-        source: 'pipes',
-        paint: { 'line-color': '#fff', 'line-width': 14, 'line-opacity': 0.08 }
+    // ── Node markers ─────────────────────────────────────────────────────────────
+    NODES.forEach(node => {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div data-node-id="${node.id}" style="width:20px;height:20px;border-radius:50%;background:${stateColor(node.state)};border:3px solid #fff;box-shadow:${stateGlow(node.state)};cursor:pointer;transition:box-shadow .3s,outline .1s;"></div>`,
+        iconSize: [26, 26],
+        iconAnchor: [13, 13]
       });
-
-      map.addLayer({
-        id: 'pipes-line',
-        type: 'line',
-        source: 'pipes',
-        paint: {
-          'line-width': 7, 'line-cap': 'round', 'line-join': 'round',
-          'line-color': ['match', ['get', 'state'],
-            'anomaly', '#f44336', 'warning', '#ff9800', '#4caf50'
-          ]
-        }
-      });
-
-      // ── Node markers ───────────────────────────────────────────────────────────
-      NODES.forEach(node => {
-        const el = document.createElement('div');
-        el.dataset.nodeId = node.id;
-        el.style.cssText = [
-          'width:20px', 'height:20px', 'border-radius:50%',
-          `background:${stateColor(node.state)}`, 'border:3px solid #fff',
-          `box-shadow:${stateGlow(node.state)}`,
-          'cursor:pointer', 'transition:box-shadow .3s ease, outline .1s ease',
-        ].join(';');
-
-        el.addEventListener('mouseenter', () => el.style.outline = '3px solid rgba(255,255,255,0.7)');
-        el.addEventListener('mouseleave', () => el.style.outline = '');
-        el.addEventListener('click', () => openPanel(node.id));
-
-        new maplibregl.Marker({ element: el })
-          .setLngLat([node.lng, node.lat])
-          .addTo(map);
-
-        markerEls.set(node.id, el);
-      });
-
-      // Start polling
-      poll();
-      setInterval(poll, POLL_INTERVAL);
+      L.marker([node.lat, node.lng], { icon }).addTo(map)
+        .on('click', () => openNode(node.id));
     });
 
-    // ── PANEL ─────────────────────────────────────────────────────────────────────
-    function openPanel(nodeId) {
+    // Start polling immediately — Leaflet needs no async 'load' event
+    poll();
+    setInterval(poll, POLL_INTERVAL);
+
+    // ── PANEL + PIPE DETAIL ───────────────────────────────────────────────────────
+    let _detectionInterval = null;
+
+    function openNode(nodeId) {
       selectedNodeId = nodeId;
       document.getElementById('panel-hint').classList.add('hidden');
       document.getElementById('panel').classList.add('open');
       document.getElementById('camera-stream').style.display = 'block';
-      map.resize();
+      _openPipeDetail(nodeId);
       refreshPanel();
     }
 
@@ -457,7 +483,126 @@
       selectedNodeId = null;
       document.getElementById('panel').classList.remove('open');
       document.getElementById('panel-hint').classList.remove('hidden');
-      map.resize();
+      document.getElementById('pipe-detail').classList.remove('active');
+      if (_detectionInterval) { clearInterval(_detectionInterval); _detectionInterval = null; }
+      map.invalidateSize();
+    }
+
+    function _openPipeDetail(nodeId) {
+      const node = NODES.find(n => n.id === nodeId);
+      if (!node) return;
+      _syncDetailHeader(node);
+      _renderPipeSvg(node.state, []);
+      document.getElementById('pipe-detect-list').innerHTML = '';
+      document.getElementById('pipe-detail').classList.add('active');
+      if (_detectionInterval) clearInterval(_detectionInterval);
+      _fetchDetections();
+      _detectionInterval = setInterval(_fetchDetections, 3000);
+    }
+
+    function _syncDetailHeader(node) {
+      document.getElementById('detail-segment-name').textContent = node.name;
+      document.getElementById('detail-temp-val').textContent = node.temp != null ? node.temp : '—';
+      document.getElementById('detail-trend-val').textContent = node.trend || '—';
+      const color = stateColor(node.state);
+      const badge = document.getElementById('detail-badge');
+      badge.textContent = node.state.toUpperCase();
+      badge.style.cssText = `background:${color}22;color:${color};border:1px solid ${color}66;` +
+        'padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:.5px;';
+    }
+
+    async function _fetchDetections() {
+      try {
+        const res = await fetch('/api/detections');
+        const data = await res.json();
+        const node = selectedNodeId !== null ? NODES.find(n => n.id === selectedNodeId) : null;
+        if (!node) return;
+        _syncDetailHeader(node);
+        _renderPipeSvg(node.state, data.detections);
+        _renderDetectionList(data.detections);
+      } catch (e) {}
+    }
+
+    // Larger bbox area = crack is close to camera (near intake).
+    // Smaller bbox area = crack is far away (deeper toward outflow).
+    // Returns 0 (intake) → 1 (outflow).
+    function _bboxDepth(bbox) {
+      const area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]);
+      const maxArea = 640 * 480 * 0.10; // ~30% of frame = very close
+      return 1 - Math.min(1, Math.max(0, area / maxArea));
+    }
+
+    function _renderPipeSvg(state, detections) {
+      const g = document.getElementById('pipe-crack-markers');
+      g.innerHTML = '';
+      const X0 = 90, W = 820, Y0 = 44, H = 72;
+      const CAM_H = 480;
+      const ns = 'http://www.w3.org/2000/svg';
+      const mk = (tag, attrs) => {
+        const el = document.createElementNS(ns, tag);
+        Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+        return el;
+      };
+
+      document.getElementById('pipe-body').setAttribute('stroke', stateColor(state));
+
+      if (detections.length === 0) {
+        const t = mk('text', { x: X0 + W / 2, y: Y0 + H / 2,
+          'text-anchor': 'middle', 'dominant-baseline': 'middle',
+          fill: '#4caf5066', 'font-size': 13 });
+        t.textContent = '✓ No defects detected';
+        g.appendChild(t);
+        return;
+      }
+
+      const _severityColor = label => {
+        if (['Rupture','Disconnect'].includes(label))       return '#ef4444';
+        if (['Deformation','Misalignment'].includes(label)) return '#f97316';
+        return '#eab308';
+      };
+      detections.forEach(det => {
+        const [x1, y1, x2, y2] = det.bbox;
+        const svgX = X0 + _bboxDepth(det.bbox) * W;            // depth → pipe position
+        const svgY = Y0 + ((y1 + y2) / 2 / CAM_H) * H;        // camera y → pipe top/bottom
+        const color = _severityColor(det.label);
+        const r = Math.max(6, Math.min(18, 6 + det.confidence * 14));
+
+        g.appendChild(mk('circle', { cx: svgX, cy: svgY, r: r + 8, fill: `${color}14` }));
+        g.appendChild(mk('circle', { cx: svgX, cy: svgY, r,
+          fill: `${color}55`, stroke: color, 'stroke-width': 2 }));
+        g.appendChild(mk('line', { x1: svgX, y1: Y0 + H, x2: svgX, y2: Y0 + H + 10,
+          stroke: color, 'stroke-width': 1, 'stroke-dasharray': '3,2' }));
+        const lbl = mk('text', { x: svgX, y: Y0 + H + 22,
+          'text-anchor': 'middle', fill: color, 'font-size': 11 });
+        lbl.textContent = det.label;
+        g.appendChild(lbl);
+        const conf = mk('text', { x: svgX, y: Y0 + H + 34,
+          'text-anchor': 'middle', fill: color, 'font-size': 10, opacity: 0.8 });
+        conf.textContent = `${Math.round(det.confidence * 100)}%`;
+        g.appendChild(conf);
+      });
+    }
+
+    function _renderDetectionList(detections) {
+      const list = document.getElementById('pipe-detect-list');
+      if (detections.length === 0) {
+        list.innerHTML = '<p style="color:#4caf50;font-size:13px;margin:0;padding:4px 0">No active defects detected</p>';
+        return;
+      }
+      const severityColor = label => {
+        if (['Rupture','Disconnect'].includes(label))       return '#ef4444';
+        if (['Deformation','Misalignment'].includes(label)) return '#f97316';
+        return '#eab308';
+      };
+      list.innerHTML = detections.map((d, i) => {
+        const color = severityColor(d.label);
+        const depth = _bboxDepth(d.bbox);
+        const pos = depth < 0.33 ? 'Near intake' : depth < 0.66 ? 'Mid-section' : 'Near outflow';
+        return `<div class="detect-item" style="border-color:${color}">
+          <div class="detect-label" style="color:${color}">${d.label}</div>
+          <div class="detect-sub">Confidence: ${Math.round(d.confidence * 100)}% &nbsp;·&nbsp; ${pos}</div>
+        </div>`;
+      }).join('');
     }
 
     function refreshPanel() {
@@ -486,6 +631,11 @@
       // Tint the camera placeholder border to match state
       document.getElementById('camera-feed').style.borderColor =
         node.state !== 'normal' ? `${color}66` : '#2a2d3e';
+
+      // Keep pipe detail header in sync when open
+      if (document.getElementById('pipe-detail').classList.contains('active')) {
+        _syncDetailHeader(node);
+      }
     }
 
     // ── FORCE ANOMALY (demo) ──────────────────────────────────────────────────────
@@ -513,15 +663,15 @@
 
     // ── APPLY STATE UPDATES ───────────────────────────────────────────────────────
     function applyNodeStates(nodes) {
-      nodes.forEach(node => {
-        const el = markerEls.get(node.id);
+      nodes.forEach((node, i) => {
+        const el = document.querySelector(`[data-node-id="${node.id}"]`);
         if (el) {
           el.style.background = stateColor(node.state);
           el.style.boxShadow  = stateGlow(node.state);
         }
+        if (_pipeLines[i]) _pipeLines[i].setStyle({ color: stateColor(node.state) });
       });
-      if (mapReady) map.getSource('pipes').setData(buildPipeGeoJSON(nodes));
-      refreshPanel();  // keep the open panel in sync
+      refreshPanel();
     }
 
     // ── STATUS BAR ────────────────────────────────────────────────────────────────
