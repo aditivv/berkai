@@ -1,1 +1,18 @@
 .env
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# camera_driver build outputs (built on the Pi — never commit)
+camera_driver/camera_resmgr
+camera_driver/*.o
+camera_driver/dht11_reader
+
+# capture artifacts
+frames/
+frame.png
+*.log

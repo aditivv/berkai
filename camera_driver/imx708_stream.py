@@ -115,7 +115,7 @@ class StreamConfig:
     width: int = DEFAULT_WIDTH
     height: int = DEFAULT_HEIGHT
     bayer: str = "rggb"          # rggb | grbg | bggr | gbrg
-    color: str = "rgb"           # rgb | gray
+    color: str = "rgb"           # rgb | bgr | gray  (bgr = cv2/ai_triage convention)
     tonemap: str = "stretch"     # stretch (percentile+gamma) | shift (>>2)
     gamma: float = 0.5           # only used by the "stretch" tonemap
     unpack: str = "full"         # full (10-bit uint16) | fast8 (8-bit MSB, ==shift)
@@ -206,7 +206,8 @@ def debayer_numpy(px16: np.ndarray, bayer: str, color: str) -> np.ndarray:
     if color == "gray":
         # Rec.601 luma in 10-bit space.
         return (0.299 * r + 0.587 * g + 0.114 * b).astype(np.uint16)
-    return np.dstack((r, g, b)).astype(np.uint16)  # RGB order
+    channels = (b, g, r) if color == "bgr" else (r, g, b)
+    return np.dstack(channels).astype(np.uint16)
 
 
 def debayer(arr: np.ndarray, cfg: StreamConfig) -> np.ndarray:
@@ -226,6 +227,8 @@ def debayer(arr: np.ndarray, cfg: StreamConfig) -> np.ndarray:
         if cfg.color == "gray":
             return cv2.cvtColor(bayer8, code_gray)
         bgr = cv2.cvtColor(bayer8, code_bgr)
+        if cfg.color == "bgr":
+            return bgr
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)  # normalise to RGB
     # numpy fallback: 2x2-bin demosaic. For fast8 the channels are already 8-bit
     # (0..255), so just cast; for the 10-bit path, tone-map down.
@@ -265,6 +268,8 @@ def _write_pnm(path: str, img: np.ndarray) -> None:
 def encode_jpeg_bytes(img: np.ndarray, quality: int = 90) -> bytes:
     """Encode an 8-bit RGB/gray array to JPEG *bytes* in memory (for streaming).
 
+    3-channel input is assumed to be RGB — do not pass color="bgr" frames here
+    (encode those with cv2.imencode directly, as app.py does).
     Needs an in-memory encoder (cv2 or PIL); the ffmpeg-to-file fallback used by
     save_jpeg is too slow for a per-frame stream, so this raises if neither is
     present rather than silently stalling the feed.
@@ -312,6 +317,10 @@ def save_jpeg(path: str, img: np.ndarray, quality: int) -> None:
 
 
 # ── The stream ──────────────────────────────────────────────────────────────────
+class ShortReadError(IOError):
+    """A partial/dropped frame — recoverable, unlike other read failures."""
+
+
 class Imx708Stream:
     """Opens /dev/video0 and produces model-ready 8-bit frames."""
 
@@ -344,7 +353,7 @@ class Imx708Stream:
             raise RuntimeError("stream not open")
         data = os.read(self._fd, self.cfg.frame_size)
         if len(data) != self.cfg.frame_size:
-            raise IOError(
+            raise ShortReadError(
                 f"short read: got {len(data)} bytes, expected {self.cfg.frame_size}"
             )
         return data
@@ -370,7 +379,9 @@ class Imx708Stream:
             t0 = time.monotonic()
             try:
                 yield self.capture()
-            except IOError as e:
+            except ShortReadError as e:
+                # Partial frame: drop it and read on. Any other OSError (driver
+                # died, fd invalid) propagates so the caller's retry logic runs.
                 log.warning("dropping frame: %s", e)
                 continue
             n += 1

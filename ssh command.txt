@@ -1,0 +1,1 @@
+ssh qnxuser@qnxpi3.local -m hmac-sha2-256

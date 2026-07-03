@@ -6,7 +6,6 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import cv2
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -60,51 +59,35 @@ _latest_detections = []
 _detections_lock = threading.Lock()
 
 # ── Camera ────────────────────────────────────────────────────────────────────
-# Camera Module 3 is read through QNX's Sensor Framework via qnx_apis, a
-# wrapper that mirrors cv2's VideoCapture API. Falls back to cv2.VideoCapture
-# if qnx_apis isn't importable (e.g. running this off the Pi for other testing) —
-# that fallback will NOT see the Camera Module 3 under QNX, it's just so the
-# rest of the app doesn't crash on import.
+# The IMX708 (Camera Module 3) is read through the QNX camera_resmgr driver's
+# /dev/video0 node via camera_driver/imx708_stream.py. CameraHub runs the ONE
+# capture thread (the driver is single-buffer — concurrent readers would fight
+# over it) and broadcasts the latest annotated JPEG to every /video_feed client
+# and the latest raw BGR frame to the inference loop, so the ~14 fps video stays
+# smooth regardless of how slow inference is.
+#
+# camera_resmgr must already be running as root or the hub shows a "NO CAMERA
+# SIGNAL" card with instructions (see start.sh / camera_driver/STREAM_USAGE.md).
 
-try:
-    import qnx_apis
-    _VideoCapture = qnx_apis.VideoCapture
-    print(_VideoCapture)
-except ImportError:
-    print("qnx_apis not found — falling back to cv2.VideoCapture (won't see the Pi camera on QNX)")
-    _VideoCapture = cv2.VideoCapture
+from camera_source import CameraHub
 
-_camera = None
-_latest_frame = None
-_frame_lock = threading.Lock()
 _STREAM_INFER_INTERVAL = 2.0  # seconds between inference passes
-_STREAM_FPS = 20              # target stream FPS
 
-def _get_camera():
-    global _camera
-    if _camera is None or not _camera.isOpened():
-        _camera = _VideoCapture(0)
-    return _camera
+def _annotate_latest(frame):
+    """Hub callback: draw the most recent detections onto each streamed frame."""
+    with _detections_lock:
+        detections = list(_latest_detections)
+    return annotate_frame(frame, detections)
 
-def _capture_loop():
-    """Thread 1: read frames from camera as fast as possible."""
-    global _latest_frame
-    cam = _get_camera()
-    while True:
-        ok, frame = cam.read()
-        if not ok:
-            time.sleep(0.01)
-            continue
-        with _frame_lock:
-            _latest_frame = frame
+_hub = CameraHub(annotate=_annotate_latest)
 
 def _infer_loop():
-    """Thread 2: run inference on latest frame every _STREAM_INFER_INTERVAL seconds."""
+    """Run inference on the hub's latest frame every _STREAM_INFER_INTERVAL s.
+    Decoupled from the video framerate: the stream never waits on the model."""
     global _latest_detections
     while True:
         time.sleep(_STREAM_INFER_INTERVAL)
-        with _frame_lock:
-            frame = _latest_frame
+        frame = _hub.latest_frame()
         if frame is None:
             continue
         detections = detect_defects(frame)
@@ -112,24 +95,14 @@ def _infer_loop():
             _latest_detections = detections
 
 def _generate_frames():
-    """Thread 3: encode and stream latest annotated frame at _STREAM_FPS."""
-    frame_interval = 1.0 / _STREAM_FPS
+    """Per-client generator: relay each new JPEG the hub publishes."""
+    seq = -1
     while True:
-        t0 = time.time()
-        with _frame_lock:
-            frame = _latest_frame
-        if frame is None:
-            time.sleep(0.01)
-            continue
-        with _detections_lock:
-            detections = list(_latest_detections)
-        annotated = annotate_frame(frame, detections)
-        _, buf = cv2.imencode('.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        jpeg, seq = _hub.wait_jpeg(seq)
+        if jpeg is None:
+            continue  # timed out waiting (camera down) — keep the socket alive
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
-        elapsed = time.time() - t0
-        if elapsed < frame_interval:
-            time.sleep(frame_interval - elapsed)
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
 
 @app.route('/video_feed')
 def video_feed():
@@ -250,8 +223,11 @@ def _run_triage_updates():
 
 if __name__ == '__main__':
     start_sensor_thread()
-    threading.Thread(target=_capture_loop, daemon=True).start()
+    _hub.start()
     threading.Thread(target=_infer_loop, daemon=True).start()
     threading.Thread(target=_run_triage_updates, daemon=True).start()
     threading.Thread(target=_monitor_anomalies, daemon=True).start()
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    # threaded=True is required: each /video_feed client holds its request
+    # thread for the life of the stream — unthreaded, one viewer would block
+    # every other route (the map, /api/*, even /login).
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False, threaded=True)
