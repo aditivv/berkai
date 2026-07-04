@@ -23,7 +23,8 @@
  *
  * Build (on the Pi):   cd ~/berkai/dht11_driver && make
  * Run (as root):       su   (password: root)
- *                      ./gpio_peek            # default GPIO17 (header pin 11)
+ *                      ./gpio_peek --selftest # automated loopback pass/fail
+ *                      ./gpio_peek            # manual watch, GPIO17 default
  *                      ./gpio_peek --pin 23   # any bank-0 pin (GPIO0..27)
  *
  * Register map (RP1 datasheet + Linux pinctrl-rp1.c; offsets from RP1 BAR0,
@@ -152,16 +153,65 @@ static void restore_pin(void)
            "(0x%08x / 0x%08x)\n", g_pin, g_orig_ctrl, g_orig_pad);
 }
 
+/*
+ * Loopback self-test: the pin drives itself LOW and watches its own input.
+ * With IE set, the input buffer samples the physical pad, so this proves the
+ * full read path tracks the real pin — no jumper wire needed. Only ever
+ * drives LOW then releases (the pull-up restores HIGH): that is exactly the
+ * DHT11 start-signal pattern, so there is no drive-high contention risk with
+ * the sensor.
+ *
+ * Returns 0 on pass (all 20 drive/release cycles read back correctly).
+ */
+static int run_selftest(void)
+{
+    int fails = 0, cyc;
+
+    printf("\n[selftest] 20x: drive LOW 50ms -> expect IN=0; "
+           "release -> pull-up must restore IN=1\n");
+    for (cyc = 0; cyc < 20; cyc++) {
+        int in_low, in_rel;
+
+        sys_rio0[RIO_OUT] &= ~(1u << g_pin);   /* prepare LOW */
+        sys_rio0[RIO_OE]  |=  (1u << g_pin);   /* drive */
+        usleep(50 * 1000);
+        in_low = !!(sys_rio0[RIO_IN] & (1u << g_pin));
+
+        sys_rio0[RIO_OE]  &= ~(1u << g_pin);   /* release: input again */
+        usleep(50 * 1000);
+        in_rel = !!(sys_rio0[RIO_IN] & (1u << g_pin));
+
+        if (in_low != 0 || in_rel != 1) {
+            fails++;
+            printf("[selftest] cycle %2d: driven-low reads %d (want 0), "
+                   "released reads %d (want 1)  <-- FAIL\n",
+                   cyc, in_low, in_rel);
+        }
+    }
+    if (fails == 0) {
+        printf("[selftest] PASS: 20/20 cycles — input path tracks the "
+               "physical pin, output drive works, pull-up present.\n");
+    } else {
+        printf("[selftest] FAIL: %d/20 cycles wrong — RIO_IN offset, pad "
+               "config, or wiring/pull-up is suspect.\n", fails);
+    }
+    return fails ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     int i;
 
+    int selftest = 0;
+
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--pin") == 0 && i + 1 < argc) {
             g_pin = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--selftest") == 0) {
+            selftest = 1;
         } else {
-            fprintf(stderr, "usage: %s [--pin N]   (bank-0 pin, GPIO0..27; "
-                    "default 17)\n", argv[0]);
+            fprintf(stderr, "usage: %s [--pin N] [--selftest]   (bank-0 pin, "
+                    "GPIO0..27; default 17)\n", argv[0]);
             return 2;
         }
     }
@@ -184,6 +234,12 @@ int main(int argc, char **argv)
     dump_pin_regs("before");
     configure_pin_as_input();
     dump_pin_regs("after ");
+
+    if (selftest) {
+        int rc = run_selftest();
+        restore_pin();
+        return rc;
+    }
 
     signal(SIGINT, on_sigint);
     printf("\nPolling ~10x/s. Touch a jumper from the pin to 3.3V and GND;\n"

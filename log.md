@@ -112,6 +112,15 @@ Created branch `feat/dht11-regread` off `video_stream_merge`. Wrote
 **Prompt 2 — this file.** Created `log.md` (session/prompt log + future goals),
 to be maintained every session.
 
+**Prompt 3 — first gpio_peek run on the Pi.** Everything it exercised passed:
+config writes read back (funcsel 31→5, pad IE/PUE set), line reads 0 with
+input disabled → 1 once the pull-up engaged (STATUS bits 17-19 high) — wiring
+and read path respond to pad config. To close the gate without a manual
+jumper, added `--selftest` to gpio_peek: the pin drives itself LOW and watches
+its own input, 20 cycles (drive-low → IN must read 0; release → pull-up must
+restore 1). Only drives low (the DHT11 start-signal pattern — no contention
+risk). This also pre-validates Phase 1's output-drive requirement.
+
 ---
 
 ## Future Goals
