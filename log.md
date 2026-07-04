@@ -121,14 +121,24 @@ its own input, 20 cycles (drive-low → IN must read 0; release → pull-up must
 restore 1). Only drives low (the DHT11 start-signal pattern — no contention
 risk). This also pre-validates Phase 1's output-drive requirement.
 
+**Prompt 4 — selftest PASS: Phase 0 CLOSED (20/20 cycles on GPIO17).**
+All register assumptions hardware-verified: funcsel 31→5 readback, pad
+IE/PUE, RIO_IN @ +0x08 tracks the physical pad, output drive works, sensor
+pull-up present, pin restore clean. Proceeded to **Phase 1**: extracted the
+verified logic into `dht11_driver/rp1_gpio.h/.c` (map/claim/save/restore/
+set_output/set_input/write + `static inline rp1_gpio_read()` for the Phase 2
+busy-wait). Refactored gpio_peek into a thin client of the module, so
+`gpio_peek --selftest` now regression-tests rp1_gpio itself. **Phase 1 gate:**
+re-run `--selftest` on the Pi after `git pull && make` — 20/20 again = pass.
+
 ---
 
 ## Future Goals
 
 **Active: DHT11 integration (branch `feat/dht11-regread`)** — see Prompt 6
 above for the full plan. Status:
-- [ ] Phase 0: on-Pi jumper test of `gpio_peek` (code ready, awaiting hardware run)
-- [ ] Phase 1: `rp1_gpio.c/h` reusable GPIO module (input + output drive tests)
+- [x] Phase 0: gpio_peek selftest PASSED on the Pi (20/20, GPIO17, 2026-07-04)
+- [ ] Phase 1: `rp1_gpio.c/h` module written; gate = re-run `--selftest` on Pi
 - [ ] Phase 2: busy-wait capture + raw pulse-width dump — **go/no-go histogram
       gate** (bimodal ~26 µs vs ~70 µs; 4 h time-box, else I2C AHT20/SHT3x
       contingency on /dev/i2c6)

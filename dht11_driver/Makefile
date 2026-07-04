@@ -20,9 +20,9 @@ TOOLS   = gpio_peek
 
 all: $(TOOLS)
 
-gpio_peek: gpio_peek.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
-	@echo "Built: gpio_peek  (run as root: ./gpio_peek)"
+gpio_peek: gpio_peek.c rp1_gpio.c rp1_gpio.h
+	$(CC) $(CFLAGS) -o $@ gpio_peek.c rp1_gpio.c $(LDFLAGS)
+	@echo "Built: gpio_peek  (run as root: ./gpio_peek --selftest)"
 
 clean:
 	rm -f *.o $(TOOLS)
