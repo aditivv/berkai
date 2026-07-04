@@ -131,6 +131,19 @@ busy-wait). Refactored gpio_peek into a thin client of the module, so
 `gpio_peek --selftest` now regression-tests rp1_gpio itself. **Phase 1 gate:**
 re-run `--selftest` on the Pi after `git pull && make` — 20/20 again = pass.
 
+**Prompt 5 — module selftest PASS: Phase 1 CLOSED (20/20 via rp1_gpio).**
+Proceeded to **Phase 2** (the go/no-go): wrote `dht11_capture.h/.c` +
+`dht11_cli.c`. Capture = start signal (20 ms LOW, release) then busy-wait
+poll of `rp1_gpio_read()` timestamping every transition with `ClockCycles()`
+(SCHED_FIFO max, pinned to CPU 3, no event queue anywhere), until 1 ms quiet
+or 20 ms guard. CLI dumps HIGH/LOW pulse widths, a 5 µs-bin histogram, and a
+per-read bimodality verdict (widest gap in the 15–110 µs region; clean =
+gap ≥ 12 µs with ≥ 5 samples each side, ≥ 40 in-frame highs), plus an
+aggregate verdict. `--raw` prints every pulse; `--intlock` disables
+interrupts on the capture CPU during the ~5 ms burst (escalation only).
+**Phase 2 gate:** `./dht11_cli --reads 20` as root — expect ≥ 90% reads
+"BIMODAL OK". 4 h time-box, then I2C contingency.
+
 ---
 
 ## Future Goals
@@ -138,10 +151,10 @@ re-run `--selftest` on the Pi after `git pull && make` — 20/20 again = pass.
 **Active: DHT11 integration (branch `feat/dht11-regread`)** — see Prompt 6
 above for the full plan. Status:
 - [x] Phase 0: gpio_peek selftest PASSED on the Pi (20/20, GPIO17, 2026-07-04)
-- [ ] Phase 1: `rp1_gpio.c/h` module written; gate = re-run `--selftest` on Pi
-- [ ] Phase 2: busy-wait capture + raw pulse-width dump — **go/no-go histogram
-      gate** (bimodal ~26 µs vs ~70 µs; 4 h time-box, else I2C AHT20/SHT3x
-      contingency on /dev/i2c6)
+- [x] Phase 1: rp1_gpio module selftest PASSED on the Pi (20/20, 2026-07-04)
+- [ ] Phase 2: busy-wait capture written (`dht11_cli`); **go/no-go gate open:**
+      `./dht11_cli --reads 20` must show bimodal ~26 µs vs ~70 µs histograms
+      (4 h time-box, else I2C AHT20/SHT3x contingency on /dev/i2c6)
 - [ ] Phase 3: offline 40-bit decode + checksum from saved dumps (restores humidity)
 - [ ] Phase 4: live CLI, 50 consecutive reads ≥90% checksum-valid vs reference
 - [ ] Phase 5: `/dev/dht11` resource manager (root, 0666, ≥2 s internal rate limit)

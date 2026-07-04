@@ -14,7 +14,7 @@ CFLAGS  = -Wall -Wextra -O2 -g \
            -I.
 LDFLAGS = -lpthread
 
-TOOLS   = gpio_peek
+TOOLS   = gpio_peek dht11_cli
 
 .PHONY: all clean
 
@@ -23,6 +23,10 @@ all: $(TOOLS)
 gpio_peek: gpio_peek.c rp1_gpio.c rp1_gpio.h
 	$(CC) $(CFLAGS) -o $@ gpio_peek.c rp1_gpio.c $(LDFLAGS)
 	@echo "Built: gpio_peek  (run as root: ./gpio_peek --selftest)"
+
+dht11_cli: dht11_cli.c dht11_capture.c rp1_gpio.c dht11_capture.h rp1_gpio.h
+	$(CC) $(CFLAGS) -o $@ dht11_cli.c dht11_capture.c rp1_gpio.c $(LDFLAGS)
+	@echo "Built: dht11_cli  (run as root: ./dht11_cli --reads 20)"
 
 clean:
 	rm -f *.o $(TOOLS)
