@@ -16,3 +16,9 @@ camera_driver/dht11_reader
 frames/
 frame.png
 *.log
+
+# dht11_driver build outputs (built on the Pi — never commit)
+dht11_driver/gpio_peek
+dht11_driver/dht11_cli
+dht11_driver/dht11_resmgr
+dht11_driver/*.o
