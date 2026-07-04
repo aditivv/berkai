@@ -1,2 +1,10 @@
 *.onnx binary
 *.pt binary
+
+# Files that run/compile on the QNX Pi must keep LF endings even when the
+# working copy is on Windows (CRLF breaks /bin/sh scripts and can upset make).
+*.sh     text eol=lf
+Makefile text eol=lf
+*.c      text eol=lf
+*.h      text eol=lf
+*.py     text eol=lf
