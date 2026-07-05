@@ -56,4 +56,12 @@ int dht11_capture_frame(int pin, dht11_capture_t *cap, int use_intr_lock);
 /* Convert a ClockCycles() delta from `cap` to microseconds. */
 double dht11_cycles_to_us(const dht11_capture_t *cap, uint64_t dt);
 
+/*
+ * Capture one frame and decode it (bridge to dht11_decode). Returns a
+ * DHT11_DECODE_* code and fills *out. The caller owns the >=2s cadence
+ * between calls.
+ */
+struct dht11_reading;   /* dht11_decode.h */
+int dht11_read_once(int pin, struct dht11_reading *out);
+
 #endif /* DHT11_CAPTURE_H */

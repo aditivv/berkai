@@ -134,11 +134,36 @@ static int verdict_bimodal(const pulse_list_t *highs_in,
             *n_short + *n_long >= 40);
 }
 
+/*
+ * --json: one reading as a single JSON line on stdout (for scripts /
+ * sensor_reader.py before the resmgr exists). Up to 3 capture attempts,
+ * 2.1 s apart (DHT11 minimum sample interval). Exit 0 on success.
+ */
+static int run_json(int pin)
+{
+    dht11_reading_t rd;
+    int attempt;
+
+    for (attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            sleep(2);
+            usleep(100 * 1000);
+        }
+        if (dht11_read_once(pin, &rd) == DHT11_DECODE_OK) {
+            printf("{\"temperature\": %.1f, \"humidity\": %.1f}\n",
+                   rd.temperature, rd.humidity);
+            return 0;
+        }
+    }
+    fprintf(stderr, "dht11_cli: no checksum-valid reading in 3 attempts\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    int pin = 17, reads = 1, raw = 0, intlock = 0, i;
+    int pin = 17, reads = 1, raw = 0, intlock = 0, json = 0, i;
     double gap_s = 2.5;
-    int ok_reads = 0;
+    int ok_reads = 0, ok_decodes = 0;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--pin") && i + 1 < argc)        pin = atoi(argv[++i]);
@@ -146,9 +171,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--gap") && i + 1 < argc)   gap_s = atof(argv[++i]);
         else if (!strcmp(argv[i], "--raw"))                   raw = 1;
         else if (!strcmp(argv[i], "--intlock"))               intlock = 1;
+        else if (!strcmp(argv[i], "--json"))                  json = 1;
         else {
             fprintf(stderr, "usage: %s [--pin N] [--reads N] [--gap SECS] "
-                    "[--raw] [--intlock]\n", argv[0]);
+                    "[--raw] [--intlock] [--json]\n", argv[0]);
             return 2;
         }
     }
@@ -161,6 +187,9 @@ int main(int argc, char **argv)
     if (dht11_capture_init(pin) != 0)
         return 1;
     dht11_boost_realtime();
+
+    if (json)
+        return run_json(pin);
 
     printf("dht11_cli: pin GPIO%d, %d read(s), %.1fs apart%s\n",
            pin, reads, gap_s, intlock ? ", INTERRUPT-LOCKED bursts" : "");
@@ -202,24 +231,25 @@ int main(int argc, char **argv)
             dht11_reading_t rd;
             int drc = dht11_decode_highs(highs.v, highs.n, &rd);
 
-            if (drc == DHT11_DECODE_OK)
+            if (drc == DHT11_DECODE_OK) {
+                ok_decodes++;
                 printf("  decode : %.1f %%RH  %.1f C   "
                        "[%u %u %u %u sum %u]  thr %.1f us\n",
                        rd.humidity, rd.temperature,
                        rd.bytes[0], rd.bytes[1], rd.bytes[2], rd.bytes[3],
                        rd.bytes[4], rd.threshold_us);
-            else
+            } else {
                 printf("  decode : FAILED (%s)  bytes [%u %u %u %u sum %u]\n",
                        drc == DHT11_DECODE_BAD_SUM ? "checksum" : "short frame",
                        rd.bytes[0], rd.bytes[1], rd.bytes[2], rd.bytes[3],
                        rd.bytes[4]);
+            }
         }
     }
 
-    printf("\n=== aggregate: %d/%d reads cleanly bimodal ===\n",
-           ok_reads, reads);
-    printf("Phase 2 gate: expect >= 90%% clean. If smeared, retry with "
-           "--intlock; if still smeared, the I2C contingency applies.\n");
+    printf("\n=== aggregate: %d/%d bimodal, %d/%d checksum-valid decodes ===\n",
+           ok_reads, reads, ok_decodes, reads);
+    printf("Phase 4 gate: >= 90%% checksum-valid over 50 reads.\n");
 
     rp1_gpio_restore(pin);
     return ok_reads == reads ? 0 : 1;

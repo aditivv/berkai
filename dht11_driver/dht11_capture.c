@@ -10,6 +10,7 @@
 #include <sys/syspage.h>
 
 #include "dht11_capture.h"
+#include "dht11_decode.h"
 #include "rp1_gpio.h"
 
 #define START_LOW_US        20000   /* host start signal: >=18 ms LOW */
@@ -101,4 +102,20 @@ int dht11_capture_frame(int pin, dht11_capture_t *cap, int use_intr_lock)
         InterruptEnable();
 
     return cap->n_edges;
+}
+
+int dht11_read_once(int pin, struct dht11_reading *out)
+{
+    dht11_capture_t cap;
+    double highs[DHT11_MAX_EDGES];
+    int n = 0, i;
+
+    dht11_capture_frame(pin, &cap, 0);
+    /* edges[i] is the transition TO edges[i].level; the time spent HIGH is
+     * t[i+1] - t[i] for edges where level==1. */
+    for (i = 0; i + 1 < cap.n_edges; i++)
+        if (cap.edges[i].level == 1)
+            highs[n++] = dht11_cycles_to_us(&cap,
+                                            cap.edges[i + 1].t - cap.edges[i].t);
+    return dht11_decode_highs(highs, n, out);
 }

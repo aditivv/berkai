@@ -18,7 +18,7 @@
 /* HIGH pulses at/above this are idle line, not frame content. */
 #define DHT11_FRAME_HIGH_MAX_US 150.0
 
-typedef struct {
+typedef struct dht11_reading {
     unsigned char bytes[5];   /* rh_int rh_dec t_int t_dec checksum */
     double humidity;          /* %RH  = bytes[0] + bytes[1]/10      */
     double temperature;       /* degC = bytes[2] + bytes[3]/10      */
