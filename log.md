@@ -144,6 +144,27 @@ interrupts on the capture CPU during the ~5 ms burst (escalation only).
 **Phase 2 gate:** `./dht11_cli --reads 20` as root — expect ≥ 90% reads
 "BIMODAL OK". 4 h time-box, then I2C contingency.
 
+**Prompts 6-7 — Q&A.** log.md lives at repo root by design (one project-wide
+log), not per-directory; recapped driver progress.
+
+**Prompt 8 — PHASE 2 GATE PASSED: 20/20 reads cleanly bimodal.**
+Real capture data: zeros ~20-30 us, ones ~70-75 us, gap ~44.6 us, 85 edges on
+every single read (complete frame: ~12 us pre-response blip + ~87 us response
++ 40 bits). The busy-wait mechanism decisively beats the qnx2 event queue —
+no --intlock needed. Proceeded to **Phase 3**: `dht11_decode.h/.c` — pure
+decode (no GPIO/QNX deps): filter in-frame highs (<150 us), take LAST 40,
+adaptive threshold = midpoint of widest gap (fallback 45 us if no gap, e.g.
+all-zero frames), assemble 5 bytes MSB-first, verify checksum. Returns
+OK/SHORT_FRAME/BAD_SUM with bytes inspectable on failure.
+`dht11_decode_test.c` (`make test`, no root): 7 vectors — nominal, 92%/12C
+ground-truth pattern, idle-tail filtering, corrupted checksum, truncated
+frame, all-zero fallback, shifted clusters. Algorithm pre-validated on
+Windows via a Python mirror of the C logic: 7/7 PASS. dht11_cli now prints
+a decode line per read (values + raw bytes + threshold).
+**Phase 3 gate:** `make test` passes on the Pi AND live `./dht11_cli
+--reads 5` decodes match a room thermometer/hygrometer (+-1 C / +-5 %RH).
+
+
 ---
 
 ## Future Goals
@@ -152,10 +173,9 @@ interrupts on the capture CPU during the ~5 ms burst (escalation only).
 above for the full plan. Status:
 - [x] Phase 0: gpio_peek selftest PASSED on the Pi (20/20, GPIO17, 2026-07-04)
 - [x] Phase 1: rp1_gpio module selftest PASSED on the Pi (20/20, 2026-07-04)
-- [ ] Phase 2: busy-wait capture written (`dht11_cli`); **go/no-go gate open:**
-      `./dht11_cli --reads 20` must show bimodal ~26 µs vs ~70 µs histograms
-      (4 h time-box, else I2C AHT20/SHT3x contingency on /dev/i2c6)
-- [ ] Phase 3: offline 40-bit decode + checksum from saved dumps (restores humidity)
+- [x] Phase 2: GATE PASSED on the Pi — 20/20 bimodal, gap ~44.6 µs (2026-07-04)
+- [ ] Phase 3: decode written + offline tests (7/7 in Python mirror); gate =
+      `make test` on Pi + live decode matches reference thermometer
 - [ ] Phase 4: live CLI, 50 consecutive reads ≥90% checksum-valid vs reference
 - [ ] Phase 5: `/dev/dht11` resource manager (root, 0666, ≥2 s internal rate limit)
 - [ ] Phase 6: `sensor_reader.py` — humidity through the data model, segment 0

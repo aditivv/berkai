@@ -23,6 +23,7 @@
 #include <unistd.h>
 
 #include "dht11_capture.h"
+#include "dht11_decode.h"
 #include "rp1_gpio.h"
 
 #define MAX_PULSES DHT11_MAX_EDGES
@@ -195,6 +196,24 @@ int main(int argc, char **argv)
             printf("  verdict: NOT CLEAN (short=%d long=%d gap=%.1f) — "
                    "rerun with --raw for full timings\n",
                    n_short, n_long, gap);
+
+        /* Phase 3: decode the frame (checksum-verified). */
+        {
+            dht11_reading_t rd;
+            int drc = dht11_decode_highs(highs.v, highs.n, &rd);
+
+            if (drc == DHT11_DECODE_OK)
+                printf("  decode : %.1f %%RH  %.1f C   "
+                       "[%u %u %u %u sum %u]  thr %.1f us\n",
+                       rd.humidity, rd.temperature,
+                       rd.bytes[0], rd.bytes[1], rd.bytes[2], rd.bytes[3],
+                       rd.bytes[4], rd.threshold_us);
+            else
+                printf("  decode : FAILED (%s)  bytes [%u %u %u %u sum %u]\n",
+                       drc == DHT11_DECODE_BAD_SUM ? "checksum" : "short frame",
+                       rd.bytes[0], rd.bytes[1], rd.bytes[2], rd.bytes[3],
+                       rd.bytes[4]);
+        }
     }
 
     printf("\n=== aggregate: %d/%d reads cleanly bimodal ===\n",

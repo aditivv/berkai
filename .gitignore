@@ -21,4 +21,5 @@ frame.png
 dht11_driver/gpio_peek
 dht11_driver/dht11_cli
 dht11_driver/dht11_resmgr
+dht11_driver/dht11_decode_test
 dht11_driver/*.o
