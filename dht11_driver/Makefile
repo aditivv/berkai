@@ -14,11 +14,15 @@ CFLAGS  = -Wall -Wextra -O2 -g \
            -I.
 LDFLAGS = -lpthread
 
-TOOLS   = gpio_peek dht11_cli dht11_decode_test
+TOOLS   = gpio_peek dht11_cli dht11_decode_test dht11_resmgr
 
 .PHONY: all clean test
 
 all: $(TOOLS)
+
+dht11_resmgr: dht11_resmgr.c dht11_capture.c dht11_decode.c rp1_gpio.c dht11_capture.h dht11_decode.h rp1_gpio.h
+	$(CC) $(CFLAGS) -o $@ dht11_resmgr.c dht11_capture.c dht11_decode.c rp1_gpio.c $(LDFLAGS)
+	@echo "Built: dht11_resmgr  (run as root: ./dht11_resmgr >/tmp/dht11.log 2>&1 &)"
 
 gpio_peek: gpio_peek.c rp1_gpio.c rp1_gpio.h
 	$(CC) $(CFLAGS) -o $@ gpio_peek.c rp1_gpio.c $(LDFLAGS)

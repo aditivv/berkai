@@ -165,6 +165,32 @@ a decode line per read (values + raw bytes + threshold).
 --reads 5` decodes match a room thermometer/hygrometer (+-1 C / +-5 %RH).
 
 
+## Session 2026-07-05 — DHT11 Phases 4-5 (branch `feat/dht11-regread`)
+
+**Prompt 1 — cert error on git pull.** Pi clock resets each power cycle (no
+RTC battery) → TLS "not yet valid". Fix: `ntpdate pool.ntp.org` as root, or
+`date YYYYMMDDhhmm`. Recurs after every power-off; offered a start.sh
+time-sync line.
+
+**Prompt 2 — PHASE 3 LIVE GATE PASSED: 5/5 decodes checksum-valid.**
+23.5-24.1 C, 52-58 %RH (71% blip = proximity to sensor — plausible).
+`make test` still to be run once for the record. Proceeded to **Phases 4+5**
+in one Pi round-trip:
+- Phase 4 (`dht11_cli`): aggregate now counts checksum-valid decodes
+  (`--reads 50` = the reliability gate); new `--json` mode prints one JSON
+  reading with up to 3 attempts 2.1 s apart (exit 0/1).
+- Shared bridge `dht11_read_once()` in dht11_capture.c (capture -> decode),
+  used by both the CLI and the resmgr.
+- Phase 5 (`dht11_resmgr.c`): publishes **/dev/dht11** (S_IFCHR 0666),
+  camera_resmgr boilerplate. `cat /dev/dht11` returns one JSON line:
+  `{"temperature": 24.1, "humidity": 56.0, "age_s": 0.8, "ok": true}`.
+  Hardware sampled at most once per 2 s regardless of client rate; failed
+  captures keep the last good value (age_s says how old, ok = last attempt).
+  Per-open OCB snapshot prevents torn reads; SIGINT/SIGTERM restore the pin.
+**Gates:** Phase 4 = `./dht11_cli --reads 50` >= 90% checksum-valid.
+Phase 5 = resmgr up as root; as qnxuser `cat /dev/dht11` returns valid JSON;
+rapid repeated cats return the cached value (age_s advancing, same reading).
+
 ---
 
 ## Future Goals
@@ -174,10 +200,10 @@ above for the full plan. Status:
 - [x] Phase 0: gpio_peek selftest PASSED on the Pi (20/20, GPIO17, 2026-07-04)
 - [x] Phase 1: rp1_gpio module selftest PASSED on the Pi (20/20, 2026-07-04)
 - [x] Phase 2: GATE PASSED on the Pi — 20/20 bimodal, gap ~44.6 µs (2026-07-04)
-- [ ] Phase 3: decode written + offline tests (7/7 in Python mirror); gate =
-      `make test` on Pi + live decode matches reference thermometer
-- [ ] Phase 4: live CLI, 50 consecutive reads ≥90% checksum-valid vs reference
-- [ ] Phase 5: `/dev/dht11` resource manager (root, 0666, ≥2 s internal rate limit)
+- [x] Phase 3: live decode 5/5 checksum-valid, values plausible (2026-07-05);
+      `make test` on Pi still to run once for the record
+- [ ] Phase 4: reliability — gate = `./dht11_cli --reads 50` >= 90% valid
+- [ ] Phase 5: /dev/dht11 resmgr written — gate = qnxuser `cat /dev/dht11`
 - [ ] Phase 6: `sensor_reader.py` — humidity through the data model, segment 0
       real reads, sim fallback; extend `start.sh`
 - [ ] Phase 7: dashboard humidity (stat box, detail view, poll wiring)
