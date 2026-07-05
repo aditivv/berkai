@@ -28,8 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/dispatch.h>
+/* iofunc.h MUST come before dispatch.h so RESMGR_OCB_T defaults to
+ * iofunc_ocb_t (not void) — otherwise io_funcs.read rejects our handler. */
 #include <sys/iofunc.h>
+#include <sys/dispatch.h>
 #include <sys/neutrino.h>
 #include <sys/syspage.h>
 
@@ -108,12 +110,10 @@ static void ocb_free(iofunc_ocb_t *ocb)
     free(ocb);
 }
 
-static iofunc_funcs_t ocb_funcs = {
-    _IOFUNC_NFUNCS, ocb_calloc, ocb_free
-};
-static iofunc_mount_t mountpoint = {
-    0, 0, 0, 0, &ocb_funcs
-};
+/* Filled in main() — QNX 8's structs have extra fields, so runtime
+ * assignment beats brace initializers (statics start zeroed anyway). */
+static iofunc_funcs_t ocb_funcs;
+static iofunc_mount_t mountpoint;
 
 static int io_read(resmgr_context_t *ctp, io_read_t *msg,
                    iofunc_ocb_t *ocb_base)
@@ -198,6 +198,11 @@ int main(int argc, char **argv)
     iofunc_func_init(_RESMGR_CONNECT_NFUNCS, &connect_funcs,
                      _RESMGR_IO_NFUNCS, &io_funcs);
     io_funcs.read = io_read;
+
+    ocb_funcs.nfuncs     = _IOFUNC_NFUNCS;
+    ocb_funcs.ocb_calloc = ocb_calloc;
+    ocb_funcs.ocb_free   = ocb_free;
+    mountpoint.funcs     = &ocb_funcs;
 
     iofunc_attr_init(&dev_attr, S_IFCHR | 0666, NULL, NULL);
     dev_attr.mount = &mountpoint;
